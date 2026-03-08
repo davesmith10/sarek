@@ -1,6 +1,6 @@
 # sarek — Post-Quantum Secrets Vault Server
 
-`sarek` is the server binary for the SAREK secrets vault. It exposes an HTTPS (or plain-HTTP) REST API for managing cryptographic trays and encrypted secrets.
+`sarek` is the server binary for the SAREK secrets vault. It exposes a secure REST API for managing cryptographic key materials and encrypted secrets.
 
 ---
 
@@ -16,7 +16,9 @@
 
 ---
 
-## Configuration
+## Setup Steps Prior to First Invocation
+
+## Configuration File
 
 `sarek` reads `/etc/sarek.yml` by default. Use `--config <path>` to override.
 
@@ -29,38 +31,13 @@ db:
   path: /var/lib/sarek            # directory for BDB environment files
 
 http:
-  port: 8443                      # listening port
+  port: 8443                      # port to listen on
 
 user:
-  adminuser: admin                # username created during bootstrap
+  adminuser: admin                # username created during bootstrap, change to suit
 ```
 
 All five fields are required; the server will refuse to start if any is missing.
-
----
-
-## First-Run Bootstrap
-
-On first start, `sarek` detects an empty database and runs an interactive bootstrap:
-
-```
-sarek: first-run bootstrap — creating database and system trays
-Admin password:
-Confirm password:
-sarek: bootstrap complete
-```
-
-Bootstrap creates:
-- `system` tray — Level3 hybrid tray, PWENC-encrypted with the admin password
-- `system-token` tray — Level2 hybrid tray, used to sign Bearer tokens
-- An admin user record with full `/*` access assertion
-
-The database directory (`db.path`) must exist and be writable before starting.
-
-```bash
-sudo mkdir -p /var/lib/sarek
-sudo chown $(whoami) /var/lib/sarek
-```
 
 ---
 
@@ -116,9 +93,36 @@ Pass those paths to `--cert` and `--key`.
 
 ### TLS Group
 
-The server advertises `X25519MLKEM768:X25519` as its preferred TLS KEM group, providing a post-quantum hybrid key exchange for all connections. OpenSSL 3.5+ and a compatible client (e.g. curl built against OpenSSL 3.5+) will negotiate the hybrid group automatically; older clients fall back to plain X25519.
+The server advertises `X25519MLKEM768:X25519` as its preferred TLS KEM group, providing a post-quantum hybrid key exchange for all connections. OpenSSL 3.5+ and a compatible client 
+(e.g. curl built against OpenSSL 3.5+) will negotiate the hybrid group automatically; older clients fall back to plain X25519.
 
 ---
+
+## First-Run Bootstrap
+
+The database directory (`db.path`) must exist and be writable before starting.
+
+```bash
+sudo mkdir -p /var/lib/sarek
+sudo chown $(whoami) /var/lib/sarek
+```
+
+On first start, `sarek` detects an empty database and runs an interactive bootstrap:
+
+```
+sarek: first-run bootstrap — creating database and system trays
+Admin password:
+Confirm password:
+sarek: bootstrap complete
+```
+
+Bootstrap creates:
+- `system` tray — Level3 hybrid tray, PWENC-encrypted with the admin password
+- `system-token` tray — Level2 hybrid tray, used to sign Bearer tokens
+- An admin user record with full `/*` access assertion
+
+---
+
 
 ## Running the Server
 
@@ -133,8 +137,6 @@ Options:
   --help            Show this message
 ```
 
-**HTTPS (recommended):**
-
 ```bash
 sarek --cert /etc/sarek/cert.pem --key /etc/sarek/key.pem
 ```
@@ -147,7 +149,7 @@ sarek --config /opt/sarek/sarek.yml \
       --key  /opt/sarek/key.pem
 ```
 
-**Development (plain HTTP):**
+**Development/Debug (plain HTTP):**
 
 ```bash
 sarek --config ./sarek.yml --dev
@@ -487,7 +489,7 @@ curl $CACERT -X DELETE "$HOST/logout" \
 
 ## Access Control
 
-Token assertions control what paths a user can read or write:
+A simple token assertion system controls what paths a user can read and write:
 
 | Assertion | Access |
 |-----------|--------|
@@ -497,3 +499,7 @@ Token assertions control what paths a user can read or write:
 | `usr:<username>` | Identity marker (always present, not a path grant) |
 
 The admin user created during bootstrap receives `/*`. When creating additional users, supply the appropriate `slc:` assertions in the `assertions` array of `POST /users`.
+
+
+
+
