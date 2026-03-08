@@ -93,8 +93,9 @@ Pass those paths to `--cert` and `--key`.
 
 ### TLS Group
 
-The server advertises `X25519MLKEM768:X25519` as its preferred TLS KEM group, providing a post-quantum hybrid key exchange for all connections. OpenSSL 3.5+ and a compatible client 
-(e.g. curl built against OpenSSL 3.5+) will negotiate the hybrid group automatically; older clients fall back to plain X25519.
+In TLS 1.3, the certificate (P-256 ECDSA above) and the key exchange are independent. The certificate authenticates the server's identity; the key exchange establishes the session's shared secret for forward secrecy — a separate negotiation.
+
+The server advertises `X25519MLKEM768:X25519` as its preferred key exchange group, providing a post-quantum hybrid key exchange for all connections. No special certificate type is needed for this; a standard P-256 or RSA cert works alongside it. OpenSSL 3.5+ and a compatible client (e.g. curl built against OpenSSL 3.5+) will negotiate the hybrid group automatically; older clients fall back to plain X25519.
 
 ---
 
