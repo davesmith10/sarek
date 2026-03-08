@@ -67,6 +67,15 @@ void create_user(SarekEnv& env,
 // Set the locked flag on a user. Throws if not found.
 void lock_user(SarekEnv& env, const std::string& username);
 
+// Return all (username, UserRecord) pairs in BDB key order.
+std::vector<std::pair<std::string, UserRecord>> list_users(SarekEnv& env);
+
+// Update the password hash for an existing user. Throws if not found.
+void update_user_password(SarekEnv& env,
+                          const std::string& username,
+                          const std::string& new_password,
+                          uint8_t scrypt_n_log2 = 20);
+
 // ---------------------------------------------------------------------------
 // TrayService
 // ---------------------------------------------------------------------------

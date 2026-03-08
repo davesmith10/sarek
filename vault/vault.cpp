@@ -360,7 +360,7 @@ void create_user(SarekEnv& env,
 
     UserRecord rec;
     rec.user_id    = user_id;
-    rec.pwhash     = hash_password(password, scrypt_n_log2);
+    rec.pwhash     = password.empty() ? "none" : hash_password(password, scrypt_n_log2);
     rec.flags      = flags;
     rec.assertions = assertions;
 
@@ -375,6 +375,39 @@ void lock_user(SarekEnv& env, const std::string& username) {
 
     UserRecord rec = unpack_user_record(*bytes);
     rec.flags |= kUserFlagLocked;
+    env.user().put(username, pack_user_record(rec));
+}
+
+std::vector<std::pair<std::string, UserRecord>> list_users(SarekEnv& env) {
+    std::vector<std::pair<std::string, UserRecord>> result;
+
+    env.user().scan(nullptr,
+        [&](const void* k, size_t ksz, const void* v, size_t vsz) -> bool {
+            std::string username(reinterpret_cast<const char*>(k), ksz);
+            std::vector<uint8_t> record(
+                reinterpret_cast<const uint8_t*>(v),
+                reinterpret_cast<const uint8_t*>(v) + vsz);
+            try {
+                result.emplace_back(username, unpack_user_record(record));
+            } catch (...) {
+                // skip malformed records
+            }
+            return true;
+        });
+
+    return result;
+}
+
+void update_user_password(SarekEnv& env,
+                          const std::string& username,
+                          const std::string& new_password,
+                          uint8_t scrypt_n_log2) {
+    auto bytes = env.user().get(username);
+    if (!bytes)
+        throw std::runtime_error("update_user_password: user '" + username + "' not found");
+
+    UserRecord rec = unpack_user_record(*bytes);
+    rec.pwhash = hash_password(new_password, scrypt_n_log2);
     env.user().put(username, pack_user_record(rec));
 }
 

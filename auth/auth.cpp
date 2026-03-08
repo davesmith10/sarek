@@ -221,6 +221,10 @@ std::optional<UserRecord> authenticate_user(SarekEnv& env,
     if (user.flags & kUserFlagLocked)
         throw std::runtime_error("authenticate_user: user '" + username + "' is locked");
 
+    // "none" sentinel means no password was ever set (invite-only account)
+    if (user.pwhash == "none")
+        return std::nullopt;
+
     if (!verify_password(password, user.pwhash))
         return std::nullopt;
 

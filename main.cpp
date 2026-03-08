@@ -3,6 +3,7 @@
 #include "bootstrap/bootstrap.hpp"
 #include "http/http.hpp"
 
+#include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -98,6 +99,16 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // ── Install signal handlers ───────────────────────────────────────────────
+    {
+        struct sigaction sa{};
+        sa.sa_handler = [](int) { sarek::request_shutdown(); };
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGINT,  &sa, nullptr);
+        sigaction(SIGTERM, &sa, nullptr);
+    }
+
     // ── Start server ──────────────────────────────────────────────────────────
     if (cert_path.empty()) {
         std::cerr << "sarek: starting plain-HTTP server on port "
@@ -114,5 +125,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    std::cerr << "sarek: shutting down — closing database\n";
+    env.reset();   // explicit BDB close before process exit
+    std::cerr << "sarek: shutdown complete\n";
     return 0;
 }

@@ -17,4 +17,8 @@ void run_server(SarekEnv&          env,
                 const std::string& cert_path = "",
                 const std::string& key_path  = "");
 
+// Signal the active server to stop its listen loop.
+// Safe to call from a signal handler; no-op if no server is running.
+void request_shutdown();
+
 } // namespace sarek

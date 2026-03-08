@@ -2,6 +2,7 @@
 #include "http/http.hpp"
 #include "vault/vault.hpp"
 #include "auth/auth.hpp"
+#include "bootstrap/user_record.hpp"
 
 #include <crystals/base64.hpp>
 #include <crystals/tray.hpp>
@@ -13,7 +14,9 @@
 #include <openssl/ssl.h>
 #include <openssl/rand.h>
 
+#include <atomic>
 #include <ctime>
+#include <unistd.h>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -21,7 +24,18 @@
 
 using json = nlohmann::json;
 
+// Active server instance; set by run_server(), read by request_shutdown().
+static std::atomic<httplib::Server*> g_active_svr{nullptr};
+
 namespace sarek {
+
+void request_shutdown() {
+    static const char msg[] = "sarek: signal received — shutting down\n";
+    (void)write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+    httplib::Server* svr = g_active_svr.load(std::memory_order_acquire);
+    if (svr) svr->stop();
+}
+
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -190,6 +204,125 @@ static void register_routes(
         res.set_content(jok("logged out"), "application/json");
     });
 
+    // ── POST /users/invite  (admin only) ─────────────────────────────────────
+    // Creates a user with no password and returns a signed token for the new user.
+    svr.Post("/users/invite", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray);
+        if (!claims) return;
+        if (!is_admin(*claims)) {
+            res.status = 403;
+            res.set_content(jerr("admin required"), "application/json");
+            return;
+        }
+        try {
+            auto body = json::parse(req.body);
+            std::string username = body.at("username").get<std::string>();
+
+            std::vector<std::string> assertions;
+            assertions.push_back("usr:" + username);
+            if (body.contains("assertions")) {
+                for (const auto& a : body.at("assertions"))
+                    assertions.push_back(a.get<std::string>());
+            }
+
+            uint64_t uid = generate_user_id(env);
+            // Empty password → "none" sentinel stored (via create_user in vault)
+            create_user(env, username, "", 0, assertions, uid);
+
+            // Load the new record and issue a token for it
+            auto user_opt = load_user(env, username);
+            if (!user_opt) throw std::runtime_error("failed to load newly created user");
+
+            auto wire = issue_token(*user_opt, tok_tray);
+            std::string token_b64 = base64_encode(wire.data(), wire.size());
+
+            res.set_content(
+                json{{"token", token_b64}, {"username", username}}.dump(),
+                "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
+    // ── POST /users/password  (authenticated user, sets own password) ─────────
+    svr.Post("/users/password", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray);
+        if (!claims) return;
+        try {
+            auto body = json::parse(req.body);
+            std::string new_password = body.at("password").get<std::string>();
+            if (new_password.empty())
+                throw std::invalid_argument("password must not be empty");
+
+            update_user_password(env, claims->username, new_password);
+            res.set_content(jok(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
+    // ── GET /users ───────────────────────────────────────────────────────────
+    svr.Get("/users", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray);
+        if (!claims) return;
+        try {
+            auto all = list_users(env);
+            bool admin = is_admin(*claims);
+
+            auto user_to_json = [](const std::string& uname, const UserRecord& r) -> json {
+                return {
+                    {"username",   uname},
+                    {"user_id",    r.user_id},
+                    {"admin",      bool(r.flags & kUserFlagAdmin)},
+                    {"locked",     bool(r.flags & kUserFlagLocked)},
+                    {"assertions", r.assertions}
+                };
+            };
+
+            json arr = json::array();
+            if (admin) {
+                for (const auto& [uname, rec] : all)
+                    arr.push_back(user_to_json(uname, rec));
+            } else {
+                for (const auto& [uname, rec] : all) {
+                    if (uname == claims->username)
+                        arr.push_back(user_to_json(uname, rec));
+                    else
+                        arr.push_back(json{{"username", uname}});
+                }
+            }
+            res.set_content(json{{"users", arr}}.dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
+    // ── POST /users/:username/password ───────────────────────────────────────
+    svr.Post(R"(/users/([^/]+)/password)", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray);
+        if (!claims) return;
+        std::string username = req.matches[1].str();
+        if (claims->username != username && !is_admin(*claims)) {
+            res.status = 403;
+            res.set_content(jerr("access denied"), "application/json");
+            return;
+        }
+        try {
+            auto body = json::parse(req.body);
+            std::string new_password = body.at("password").get<std::string>();
+            if (new_password.empty())
+                throw std::invalid_argument("password must not be empty");
+            update_user_password(env, username, new_password);
+            res.set_content(jok(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
     // ── POST /users  (admin only) ────────────────────────────────────────────
     svr.Post("/users", [&](const httplib::Request& req, httplib::Response& res) {
         auto claims = try_auth(req, res, tok_tray);
@@ -262,6 +395,56 @@ static void register_routes(
             res.set_content(json{{"trays", arr}}.dump(), "application/json");
         } catch (const std::exception& e) {
             res.status = 500;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
+    // ── GET /trays/:alias/export ─────────────────────────────────────────────
+    // Returns tray JSON including sk_b64 for all slots. Owner or admin only.
+    // Registered before /trays/:alias so it matches first.
+    svr.Get(R"(/trays/([^/]+)/export)", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray);
+        if (!claims) return;
+        try {
+            std::string alias = req.matches[1].str();
+            Tray t = load_tray_by_alias(env, alias);
+
+            // Ownership check: must be admin or own the tray
+            if (!is_admin(*claims)) {
+                auto user_opt = load_user(env, claims->username);
+                if (!user_opt) throw std::runtime_error("current user not found in DB");
+                auto owned = list_trays_for_user(env, user_opt->user_id);
+                bool found = false;
+                for (const auto& a : owned) if (a == alias) { found = true; break; }
+                if (!found) {
+                    res.status = 403;
+                    res.set_content(jerr("access denied"), "application/json");
+                    return;
+                }
+            }
+
+            // Build response including secret key bytes
+            json slots = json::array();
+            for (const auto& s : t.slots) {
+                json slot = {
+                    {"alg",    s.alg_name},
+                    {"pk_b64", base64_encode(s.pk.data(), s.pk.size())}
+                };
+                if (!s.sk.empty())
+                    slot["sk_b64"] = base64_encode(s.sk.data(), s.sk.size());
+                slots.push_back(slot);
+            }
+            json out = {
+                {"id",      t.id},
+                {"alias",   t.alias},
+                {"type",    t.type_str},
+                {"created", t.created},
+                {"expires", t.expires},
+                {"slots",   slots}
+            };
+            res.set_content(out.dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 404;
             res.set_content(jerr(e.what()), "application/json");
         }
     });
@@ -453,12 +636,22 @@ void run_server(SarekEnv&          env,
             });
 
         register_routes(svr, env, cfg, tok_tray, data_cache);
-        svr.listen("0.0.0.0", cfg.http_port);
+        g_active_svr.store(&svr, std::memory_order_release);
+        if (!svr.bind_to_port("0.0.0.0", cfg.http_port))
+            throw std::runtime_error("failed to bind to port " + std::to_string(cfg.http_port));
+        std::cerr << "sarek: server started successfully on port " << cfg.http_port << " (HTTPS)\n";
+        svr.listen_after_bind();
+        g_active_svr.store(nullptr, std::memory_order_release);
     } else {
         // Plain HTTP (development / test only)
         httplib::Server svr;
         register_routes(svr, env, cfg, tok_tray, data_cache);
-        svr.listen("0.0.0.0", cfg.http_port);
+        g_active_svr.store(&svr, std::memory_order_release);
+        if (!svr.bind_to_port("0.0.0.0", cfg.http_port))
+            throw std::runtime_error("failed to bind to port " + std::to_string(cfg.http_port));
+        std::cerr << "sarek: server started successfully on port " << cfg.http_port << " (HTTP)\n";
+        svr.listen_after_bind();
+        g_active_svr.store(nullptr, std::memory_order_release);
     }
 }
 
