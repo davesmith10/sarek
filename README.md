@@ -26,13 +26,10 @@
 defaults:
   cache-ttl: 300                  # object cache TTL in seconds
   max-data-node-sz: 1mb           # max size for a single secret (b/kb/mb/gb)
-
 db:
   path: /var/lib/sarek            # directory for BDB environment files
-
 http:
   port: 8443                      # port to listen on
-
 user:
   adminuser: admin                # username created during bootstrap, change to suit
 ```
