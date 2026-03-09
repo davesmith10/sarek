@@ -81,6 +81,13 @@ SarekConfig load_config(const std::string& path) {
             cfg.trusted_proxies.push_back(node.as<std::string>());
     }
 
+    cfg.log_dir = "/var/log";
+    if (root["log"] && root["log"]["dir"])
+        cfg.log_dir = root["log"]["dir"].as<std::string>();
+    // Strip trailing slashes so path construction is always clean.
+    while (cfg.log_dir.size() > 1 && cfg.log_dir.back() == '/')
+        cfg.log_dir.pop_back();
+
     return cfg;
 }
 

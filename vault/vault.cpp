@@ -15,7 +15,9 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -49,8 +51,9 @@ static uint32_t read_be32(const uint8_t* p) {
 // ---------------------------------------------------------------------------
 
 std::vector<uint8_t> pack_metadata(const MetadataRecord& m) {
-    const bool has_link = !m.link_path.empty();
-    const uint32_t map_size = has_link ? 6 : 5;
+    const bool has_link    = !m.link_path.empty();
+    const bool has_creator = (m.creator_id != 0);
+    const uint32_t map_size = 5 + (has_link ? 1 : 0) + (has_creator ? 1 : 0);
 
     msgpack::sbuffer buf;
     msgpack::packer<msgpack::sbuffer> pk(buf);
@@ -63,6 +66,9 @@ std::vector<uint8_t> pack_metadata(const MetadataRecord& m) {
     pk.pack(std::string("tr")); pk.pack(m.tray_id);
     if (has_link) {
         pk.pack(std::string("lk")); pk.pack(m.link_path);
+    }
+    if (has_creator) {
+        pk.pack(std::string("ow")); pk.pack_uint64(m.creator_id);
     }
 
     return {reinterpret_cast<const uint8_t*>(buf.data()),
@@ -96,6 +102,8 @@ MetadataRecord unpack_metadata(const std::vector<uint8_t>& data) {
             m.tray_id.assign(kv.val.via.str.ptr, kv.val.via.str.size);
         } else if (key == "lk") {
             m.link_path.assign(kv.val.via.str.ptr, kv.val.via.str.size);
+        } else if (key == "ow") {
+            m.creator_id = kv.val.as<uint64_t>();
         }
     }
     return m;
@@ -503,7 +511,8 @@ void create_secret(SarekEnv&                  env,
                    const std::string&          path,
                    const std::vector<uint8_t>& plaintext,
                    const Tray&                 tray,
-                   const std::string&          mimetype) {
+                   const std::string&          mimetype,
+                   uint64_t                    creator_id) {
     validate_path(path);
 
     if (env.path().get(path))
@@ -514,11 +523,12 @@ void create_secret(SarekEnv&                  env,
     auto encrypted = obiwan_encrypt(plaintext, tray);
 
     MetadataRecord meta;
-    meta.object_id = object_id;
-    meta.created   = static_cast<int64_t>(std::time(nullptr));
-    meta.size      = plaintext.size();
-    meta.mimetype  = mimetype;
-    meta.tray_id   = tray.id;
+    meta.object_id  = object_id;
+    meta.created    = static_cast<int64_t>(std::time(nullptr));
+    meta.size       = plaintext.size();
+    meta.mimetype   = mimetype;
+    meta.tray_id    = tray.id;
+    meta.creator_id = creator_id;
 
     auto meta_bytes = pack_metadata(meta);
     auto id_enc     = encode_uint64(object_id);
@@ -661,6 +671,123 @@ void create_link(SarekEnv&          env,
 
     get_logger()->info("link.create: link={} -> target={} by={}",
                        link_path, target_path, get_request_user());
+}
+
+// ---------------------------------------------------------------------------
+// delete_user (cascade)
+// ---------------------------------------------------------------------------
+
+DeleteUserResult delete_user(SarekEnv& env, const std::string& username) {
+    // 1. Load the user record to get user_id
+    auto user_bytes = env.user().get(username);
+    if (!user_bytes)
+        throw std::runtime_error("delete_user: user '" + username + "' not found");
+    UserRecord user_rec = unpack_user_record(*user_bytes);
+    uint64_t user_id = user_rec.user_id;
+
+    // 2. Scan tray table → collect trays owned by this user
+    struct TrayEntry {
+        std::array<uint8_t, 16> uuid_bytes;
+        std::string alias;
+        std::string tray_id_str; // hex UUID string for matching metadata
+    };
+    std::vector<TrayEntry> owned_trays;
+
+    env.tray().scan(nullptr,
+        [&](const void* k, size_t ksz, const void* v, size_t vsz) -> bool {
+            if (ksz != 16) return true;
+            std::vector<uint8_t> record(
+                reinterpret_cast<const uint8_t*>(v),
+                reinterpret_cast<const uint8_t*>(v) + vsz);
+            try {
+                TrayRecord r = parse_tray_record_full(record);
+                if (r.owner == user_id) {
+                    TrayEntry e;
+                    std::memcpy(e.uuid_bytes.data(), k, 16);
+                    e.alias = r.alias;
+                    // Convert 16 raw bytes → canonical UUID string (8-4-4-4-12)
+                    char buf[37];
+                    const auto* b = reinterpret_cast<const uint8_t*>(k);
+                    std::snprintf(buf, sizeof(buf),
+                        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+                    e.tray_id_str = buf;
+                    owned_trays.push_back(std::move(e));
+                }
+            } catch (...) {}
+            return true;
+        });
+
+    // 3. Build set of tray_id strings to match against metadata
+    std::set<std::string> tray_id_set;
+    for (const auto& t : owned_trays)
+        tray_id_set.insert(t.tray_id_str);
+
+    // 4. Scan metadata → collect object_ids where tray_id matches
+    std::vector<uint64_t> oids_to_delete;
+
+    env.metadata().scan(nullptr,
+        [&](const void*, size_t, const void* v, size_t vsz) -> bool {
+            std::vector<uint8_t> record(
+                reinterpret_cast<const uint8_t*>(v),
+                reinterpret_cast<const uint8_t*>(v) + vsz);
+            try {
+                MetadataRecord m = unpack_metadata(record);
+                if (tray_id_set.count(m.tray_id))
+                    oids_to_delete.push_back(m.object_id);
+            } catch (...) {}
+            return true;
+        });
+
+    // 5. Build set for O(1) lookup
+    std::set<uint64_t> oid_set(oids_to_delete.begin(), oids_to_delete.end());
+
+    // 6. Scan path table → collect path strings mapping to deleted object_ids
+    std::vector<std::string> paths_to_delete;
+
+    env.path().scan(nullptr,
+        [&](const void* k, size_t ksz, const void* v, size_t vsz) -> bool {
+            if (vsz == 8) {
+                uint64_t oid = decode_uint64(v);
+                if (oid_set.count(oid)) {
+                    paths_to_delete.emplace_back(
+                        reinterpret_cast<const char*>(k), ksz);
+                }
+            }
+            return true;
+        });
+
+    // 7. Single transaction: delete everything
+    auto txn = env.begin_txn();
+
+    for (const auto& p : paths_to_delete)
+        env.path().del(p, txn.get());
+
+    for (uint64_t oid : oid_set) {
+        env.metadata().del(oid, txn.get());
+        env.data().del(oid, txn.get());
+    }
+
+    for (const auto& t : owned_trays) {
+        env.tray().del(t.uuid_bytes.data(), 16, txn.get());
+        if (!t.alias.empty())
+            env.tray_alias().del(t.alias, txn.get());
+    }
+
+    env.user().del(username, txn.get());
+
+    txn->commit();
+
+    DeleteUserResult result;
+    result.trays_deleted   = static_cast<int>(owned_trays.size());
+    result.secrets_deleted = static_cast<int>(oids_to_delete.size());
+
+    get_logger()->warn("user.delete: username={} trays={} secrets={} by={}",
+                       username, result.trays_deleted, result.secrets_deleted,
+                       get_request_user());
+
+    return result;
 }
 
 } // namespace sarek

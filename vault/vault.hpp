@@ -24,6 +24,7 @@ struct MetadataRecord {
     std::string mimetype;
     std::string tray_id;           // UUID string of the encrypting tray
     std::string link_path;         // non-empty → this record is a symlink
+    uint64_t    creator_id = 0;    // user_id of creator; 0 = unknown (pre-schema records)
 };
 
 std::vector<uint8_t> pack_metadata(const MetadataRecord& m);
@@ -104,7 +105,8 @@ void create_secret(SarekEnv&                  env,
                    const std::string&          path,
                    const std::vector<uint8_t>& plaintext,
                    const Tray&                 tray,
-                   const std::string&          mimetype = "application/octet-stream");
+                   const std::string&          mimetype = "application/octet-stream",
+                   uint64_t                    creator_id = 0);
 
 // Read and decrypt a secret. Follows link chains (up to 8 hops).
 // If data_cache is non-null, checks it before decryption and populates on miss.
@@ -123,5 +125,19 @@ std::vector<std::string> list_secrets(SarekEnv& env, const std::string& prefix =
 void create_link(SarekEnv&          env,
                  const std::string& target_path,
                  const std::string& link_path);
+
+// ---------------------------------------------------------------------------
+// Admin operations
+// ---------------------------------------------------------------------------
+
+struct DeleteUserResult {
+    int trays_deleted   = 0;
+    int secrets_deleted = 0;
+};
+
+// Delete a user and cascade-delete all owned trays and associated secrets.
+// Throws if the user is not found. Does NOT permit deleting admin-flagged users
+// (caller must check before calling).
+DeleteUserResult delete_user(SarekEnv& env, const std::string& username);
 
 } // namespace sarek

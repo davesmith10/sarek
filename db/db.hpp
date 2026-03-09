@@ -71,6 +71,9 @@ public:
               const std::function<bool(const void* k, size_t ksz,
                                        const void* v, size_t vsz)>& cb);
 
+    // ---- Truncate (delete all records) ------------------------------------
+    void truncate(SarekTxn* txn = nullptr);
+
 private:
     friend class SarekEnv;
     DB* db_ = nullptr;

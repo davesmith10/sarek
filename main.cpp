@@ -82,7 +82,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ── Initialize logging ────────────────────────────────────────────────────
-    sarek::init_logging("/var/log/sarek/sarek.log", dev_mode);
+    sarek::init_logging(cfg.log_dir + "/sarek/sarek.log", dev_mode);
     auto log = sarek::get_logger();
 
     log->info("config loaded from {}", config_path);

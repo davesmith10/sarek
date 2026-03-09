@@ -217,6 +217,8 @@ static void register_routes(
         auto claims = try_auth(req, res, tok_tray);
         if (!claims) return;
         if (!is_admin(*claims)) {
+            get_logger()->warn("[cmd=newuser] admin required user={} addr={}",
+                               claims->username, req.remote_addr);
             res.status = 403;
             res.set_content(jerr("admin required"), "application/json");
             return;
@@ -319,6 +321,8 @@ static void register_routes(
         if (!claims) return;
         std::string username = req.matches[1].str();
         if (claims->username != username && !is_admin(*claims)) {
+            get_logger()->warn("[cmd=changepass] DENIED user={} target={} addr={}",
+                               claims->username, username, req.remote_addr);
             res.status = 403;
             res.set_content(jerr("access denied"), "application/json");
             return;
@@ -338,11 +342,94 @@ static void register_routes(
         }
     });
 
+    // ── DELETE /users/:username  (admin only) ────────────────────────────────
+    svr.Delete(R"(/users/([^/]+))", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray);
+        if (!claims) return;
+        if (!is_admin(*claims)) {
+            get_logger()->warn("[cmd=deluser] admin required user={} addr={}",
+                               claims->username, req.remote_addr);
+            res.status = 403;
+            res.set_content(jerr("admin required"), "application/json");
+            return;
+        }
+        std::string username = req.matches[1].str();
+        if (username == claims->username) {
+            res.status = 400;
+            res.set_content(jerr("cannot delete own account"), "application/json");
+            return;
+        }
+        set_request_user(claims->username);
+        try {
+            auto target_opt = load_user(env, username);
+            if (!target_opt) {
+                res.status = 404;
+                res.set_content(jerr("user not found"), "application/json");
+                clear_request_user();
+                return;
+            }
+            if (target_opt->flags & kUserFlagAdmin) {
+                res.status = 400;
+                res.set_content(jerr("cannot delete admin account"), "application/json");
+                clear_request_user();
+                return;
+            }
+            auto result = delete_user(env, username);
+            get_logger()->warn("[cmd=deluser] by={} target={} trays={} secrets={} addr={}",
+                               claims->username, username,
+                               result.trays_deleted, result.secrets_deleted, req.remote_addr);
+            res.set_content(
+                json{{"deleted",  username},
+                     {"trays",    result.trays_deleted},
+                     {"secrets",  result.secrets_deleted}}.dump(),
+                "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+        clear_request_user();
+    });
+
+    // ── DELETE /admin/flush  (admin only) ────────────────────────────────────
+    svr.Delete("/admin/flush", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray);
+        if (!claims) return;
+        if (!is_admin(*claims)) {
+            get_logger()->warn("[cmd=flush] admin required user={} addr={}",
+                               claims->username, req.remote_addr);
+            res.status = 403;
+            res.set_content(jerr("admin required"), "application/json");
+            return;
+        }
+        if (!req.has_param("confirm") || req.get_param_value("confirm") != "flush") {
+            res.status = 400;
+            res.set_content(
+                jerr("add query param ?confirm=flush to proceed"),
+                "application/json");
+            return;
+        }
+        get_logger()->warn("[cmd=flush] ALL DATABASES FLUSHED by={} addr={}",
+                           claims->username, req.remote_addr);
+        env.tray().truncate();
+        env.tray_alias().truncate();
+        env.user().truncate();
+        env.data().truncate();
+        env.metadata().truncate();
+        env.path().truncate();
+        res.set_content(
+            json{{"status",  "flushed"},
+                 {"message", "All databases cleared. Restart server to re-bootstrap."}}.dump(),
+            "application/json");
+        request_shutdown();
+    });
+
     // ── POST /users  (admin only) ────────────────────────────────────────────
     svr.Post("/users", [&](const httplib::Request& req, httplib::Response& res) {
         auto claims = try_auth(req, res, tok_tray);
         if (!claims) return;
         if (!is_admin(*claims)) {
+            get_logger()->warn("[cmd=createuser] admin required user={} addr={}",
+                               claims->username, req.remote_addr);
             res.status = 403;
             res.set_content(jerr("admin required"), "application/json");
             return;
@@ -445,6 +532,8 @@ static void register_routes(
                 bool found = false;
                 for (const auto& a : owned) if (a == alias) { found = true; break; }
                 if (!found) {
+                    get_logger()->warn("[cmd=exporttray] DENIED user={} alias={} addr={}",
+                                       claims->username, alias, req.remote_addr);
                     res.status = 403;
                     res.set_content(jerr("access denied"), "application/json");
                     return;
@@ -483,6 +572,8 @@ static void register_routes(
         auto claims = try_auth(req, res, tok_tray);
         if (!claims) return;
         if (!is_admin(*claims)) {
+            get_logger()->warn("[cmd=viewtray] admin required user={} addr={}",
+                               claims->username, req.remote_addr);
             res.status = 403;
             res.set_content(jerr("admin required"), "application/json");
             return;
@@ -510,6 +601,8 @@ static void register_routes(
             // If PWENC-encrypted: admin gets a prompt indicator; non-admin gets 403.
             if (is_tray_encrypted(env, alias)) {
                 if (!is_admin(*claims)) {
+                    get_logger()->warn("[cmd=gettray] DENIED (encrypted) user={} alias={} addr={}",
+                                       claims->username, alias, req.remote_addr);
                     res.status = 403;
                     res.set_content(jerr("access denied"), "application/json");
                 } else {
@@ -534,6 +627,8 @@ static void register_routes(
         if (!claims) return;
         std::string path = "/" + req.matches[1].str();
         if (!scope_allows(*claims, path)) {
+            get_logger()->warn("[cmd=meta] DENIED user={} path={} addr={}",
+                               claims->username, path, req.remote_addr);
             res.status = 403;
             res.set_content(jerr("access denied"), "application/json");
             return;
@@ -544,11 +639,12 @@ static void register_routes(
         try {
             MetadataRecord m = read_metadata(env, path);
             json o = {
-                {"object_id", m.object_id},
-                {"created",   m.created},
-                {"size",      m.size},
-                {"mimetype",  m.mimetype},
-                {"tray_id",   m.tray_id}
+                {"object_id",  m.object_id},
+                {"created",    m.created},
+                {"size",       m.size},
+                {"mimetype",   m.mimetype},
+                {"tray_id",    m.tray_id},
+                {"creator_id", m.creator_id}
             };
             if (!m.link_path.empty())
                 o["link_path"] = m.link_path;
@@ -565,6 +661,8 @@ static void register_routes(
         if (!claims) return;
         std::string path = "/" + req.matches[1].str();
         if (!scope_allows(*claims, path)) {
+            get_logger()->warn("[cmd=create] DENIED user={} path={} addr={}",
+                               claims->username, path, req.remote_addr);
             res.status = 403;
             res.set_content(jerr("access denied"), "application/json");
             return;
@@ -580,8 +678,11 @@ static void register_routes(
             std::string mimetype = req.get_header_value("Content-Type");
             if (mimetype.empty()) mimetype = "application/octet-stream";
 
+            auto creator_opt = load_user(env, claims->username);
+            uint64_t creator_id = creator_opt ? creator_opt->user_id : 0;
+
             std::vector<uint8_t> body_bytes(req.body.begin(), req.body.end());
-            create_secret(env, path, body_bytes, tray, mimetype);
+            create_secret(env, path, body_bytes, tray, mimetype, creator_id);
 
             get_logger()->info("[cmd=create] user={} path={} size={} addr={}",
                                claims->username, path, req.body.size(), req.remote_addr);
@@ -601,6 +702,8 @@ static void register_routes(
         if (!claims) return;
         std::string path = "/" + req.matches[1].str();
         if (!scope_allows(*claims, path)) {
+            get_logger()->warn("[cmd=read] DENIED user={} path={} addr={}",
+                               claims->username, path, req.remote_addr);
             res.status = 403;
             res.set_content(jerr("access denied"), "application/json");
             return;
@@ -662,6 +765,8 @@ static void register_routes(
             std::string link   = body.at("link").get<std::string>();
 
             if (!scope_allows(*claims, link) || !scope_allows(*claims, target)) {
+                get_logger()->warn("[cmd=link] DENIED user={} target={} link={} addr={}",
+                                   claims->username, target, link, req.remote_addr);
                 res.status = 403;
                 res.set_content(jerr("access denied"), "application/json");
                 clear_request_user();

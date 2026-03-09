@@ -13,6 +13,7 @@ struct SarekConfig {
     int         http_port;        // http.port
     std::string admin_user;       // user.adminuser
     std::vector<std::string> trusted_proxies; // http.trusted-proxies (optional)
+    std::string log_dir;          // log.dir (default: /var/log)
 };
 
 // Throws std::runtime_error  if file is missing or a required field is absent.

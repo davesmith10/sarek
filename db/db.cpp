@@ -151,6 +151,12 @@ void SarekDb::scan(SarekTxn* txn,
         bdb_check(ret, "SarekDb::scan");
 }
 
+void SarekDb::truncate(SarekTxn* txn) {
+    uint32_t count = 0;
+    bdb_check(db_->truncate(db_, txn ? txn->handle() : nullptr, &count, 0),
+              "SarekDb::truncate");
+}
+
 // ---------------------------------------------------------------------------
 // SarekTxn
 // ---------------------------------------------------------------------------

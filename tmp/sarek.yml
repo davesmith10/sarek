@@ -13,3 +13,5 @@ http:
   #   - 10.0.0.1                  # proxy on a specific remote host
 user:
   adminuser: admin                # username created during bootstrap, change to suit
+log:
+  dir: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp  # default /var/log

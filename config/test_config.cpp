@@ -67,8 +67,33 @@ user:
     assert(cfg.db_path          == "/var/lib/sarek");
     assert(cfg.http_port        == 8080);
     assert(cfg.admin_user       == "admin");
+    assert(cfg.log_dir          == "/var/log");   // default when not specified
 
     std::puts("load_config (happy path): OK");
+}
+
+static void test_load_config_log_dir() {
+    const char* yaml = R"yaml(---
+defaults:
+  cache-ttl: 300
+  max-data-node-sz: 1mb
+db:
+  path: /var/lib/sarek
+http:
+  port: 8443
+user:
+  adminuser: admin
+log:
+  dir: /tmp/sarek-logs
+)yaml";
+
+    std::string p = write_tmp(yaml);
+    sarek::SarekConfig cfg = sarek::load_config(p);
+    std::remove(p.c_str());
+
+    assert(cfg.log_dir == "/tmp/sarek-logs");
+
+    std::puts("load_config (log.dir): OK");
 }
 
 static void test_load_config_missing_field() {
@@ -137,6 +162,7 @@ static void test_load_config_missing_file() {
 int main() {
     test_parse_size_str();
     test_load_config_happy_path();
+    test_load_config_log_dir();
     test_load_config_missing_field();
     test_load_config_bad_suffix();
     test_load_config_missing_file();
