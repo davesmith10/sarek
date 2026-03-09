@@ -195,6 +195,37 @@ Tray load_tray_by_alias(SarekEnv& env, const std::string& alias) {
     return tray_mp::unpack(blob);
 }
 
+bool is_tray_encrypted(SarekEnv& env, const std::string& alias) {
+    auto id_bytes = env.tray_alias().get(alias);
+    if (!id_bytes || id_bytes->size() != 16) return false;
+    auto record_bytes = env.tray().get(id_bytes->data(), id_bytes->size());
+    if (!record_bytes) return false;
+    uint8_t enc = 0;
+    parse_tray_record_blob(*record_bytes, enc);
+    return enc != 0;
+}
+
+Tray load_tray_by_alias_pwenc(SarekEnv& env, const std::string& alias,
+                               const std::string& password) {
+    auto id_bytes = env.tray_alias().get(alias);
+    if (!id_bytes)
+        throw std::runtime_error("load_tray_by_alias_pwenc: alias '" + alias + "' not found");
+    if (id_bytes->size() != 16)
+        throw std::runtime_error("load_tray_by_alias_pwenc: alias value is not 16 bytes");
+
+    auto record_bytes = env.tray().get(id_bytes->data(), id_bytes->size());
+    if (!record_bytes)
+        throw std::runtime_error("load_tray_by_alias_pwenc: tray record not found");
+
+    uint8_t enc = 0;
+    auto blob = parse_tray_record_blob(*record_bytes, enc);
+    if (enc == 0)
+        throw std::runtime_error("load_tray_by_alias_pwenc: tray '" + alias + "' is not password-encrypted");
+
+    auto plain = pwenc_decrypt_blob(blob, password);
+    return tray_mp::unpack(plain);
+}
+
 // ---------------------------------------------------------------------------
 // load_user
 // ---------------------------------------------------------------------------

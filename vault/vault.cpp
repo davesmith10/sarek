@@ -465,6 +465,27 @@ std::vector<std::string> list_trays_for_user(SarekEnv& env, uint64_t owner_user_
     return result;
 }
 
+std::vector<std::string> list_all_trays(SarekEnv& env) {
+    std::vector<std::string> result;
+
+    env.tray().scan(nullptr,
+        [&](const void*, size_t, const void* v, size_t vsz) -> bool {
+            std::vector<uint8_t> record(
+                reinterpret_cast<const uint8_t*>(v),
+                reinterpret_cast<const uint8_t*>(v) + vsz);
+            try {
+                TrayRecord r = parse_tray_record_full(record);
+                if (!r.alias.empty())
+                    result.push_back(r.alias);
+            } catch (...) {
+                // skip malformed records
+            }
+            return true;
+        });
+
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // SecretService
 // ---------------------------------------------------------------------------

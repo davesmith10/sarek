@@ -76,6 +76,11 @@ SarekConfig load_config(const std::string& path) {
     cfg.http_port        = require("http", "port").as<int>();
     cfg.admin_user       = require("user", "adminuser").as<std::string>();
 
+    if (root["http"] && root["http"]["trusted-proxies"]) {
+        for (const auto& node : root["http"]["trusted-proxies"])
+            cfg.trusted_proxies.push_back(node.as<std::string>());
+    }
+
     return cfg;
 }
 

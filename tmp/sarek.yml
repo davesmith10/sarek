@@ -8,5 +8,8 @@ db:
   path: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/db     # directory for BDB environment files
 http:
   port: 8443                      # port to listen on
+  # trusted-proxies:              # uncomment if sarek sits behind a reverse proxy
+  #   - 127.0.0.1                 # proxy on same host (e.g. nginx on localhost)
+  #   - 10.0.0.1                  # proxy on a specific remote host
 user:
   adminuser: admin                # username created during bootstrap, change to suit

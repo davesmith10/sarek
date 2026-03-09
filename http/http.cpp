@@ -180,6 +180,8 @@ static void register_routes(
 
             auto user_opt = authenticate_user(env, username, password);
             if (!user_opt) {
+                std::cerr << "sarek: login rejected: user=" << username
+                          << " addr=" << req.remote_addr << "\n";
                 res.status = 401;
                 res.set_content(jerr("invalid password"), "application/json");
                 return;
@@ -188,9 +190,14 @@ static void register_routes(
             auto wire  = issue_token(*user_opt, tok_tray);
             std::string token_b64 = base64_encode(wire.data(), wire.size());
 
+            std::cout << "sarek: login: user=" << username
+                      << " addr=" << req.remote_addr << std::endl;
+
             res.set_content(json{{"token", token_b64}, {"username", username}}.dump(),
                             "application/json");
         } catch (const std::exception& e) {
+            std::cerr << "sarek: login error: " << e.what()
+                      << " addr=" << req.remote_addr << "\n";
             res.status = 400;
             res.set_content(jerr(e.what()), "application/json");
         }
@@ -386,10 +393,14 @@ static void register_routes(
         auto claims = try_auth(req, res, tok_tray);
         if (!claims) return;
         try {
-            auto user_opt = load_user(env, claims->username);
-            if (!user_opt) throw std::runtime_error("current user not found in DB");
-
-            auto aliases = list_trays_for_user(env, user_opt->user_id);
+            std::vector<std::string> aliases;
+            if (is_admin(*claims)) {
+                aliases = list_all_trays(env);
+            } else {
+                auto user_opt = load_user(env, claims->username);
+                if (!user_opt) throw std::runtime_error("current user not found in DB");
+                aliases = list_trays_for_user(env, user_opt->user_id);
+            }
             json arr = json::array();
             for (const auto& a : aliases) arr.push_back(a);
             res.set_content(json{{"trays", arr}}.dump(), "application/json");
@@ -449,12 +460,46 @@ static void register_routes(
         }
     });
 
+    // ── POST /trays/:alias/view  (admin only, decrypts PWENC tray) ───────────
+    // Registered before GET /trays/:alias so the regex matches first.
+    svr.Post(R"(/trays/([^/]+)/view)", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray);
+        if (!claims) return;
+        if (!is_admin(*claims)) {
+            res.status = 403;
+            res.set_content(jerr("admin required"), "application/json");
+            return;
+        }
+        try {
+            std::string alias = req.matches[1].str();
+            auto body = json::parse(req.body);
+            std::string password = body.at("password").get<std::string>();
+            Tray t = load_tray_by_alias_pwenc(env, alias, password);
+            res.set_content(tray_to_json(t).dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
     // ── GET /trays/:alias ────────────────────────────────────────────────────
     svr.Get(R"(/trays/([^/]+))", [&](const httplib::Request& req, httplib::Response& res) {
         auto claims = try_auth(req, res, tok_tray);
         if (!claims) return;
         try {
             std::string alias = req.matches[1].str();
+            // If PWENC-encrypted: admin gets a prompt indicator; non-admin gets 403.
+            if (is_tray_encrypted(env, alias)) {
+                if (!is_admin(*claims)) {
+                    res.status = 403;
+                    res.set_content(jerr("access denied"), "application/json");
+                } else {
+                    res.set_content(
+                        json{{"encrypted", true}, {"alias", alias}}.dump(),
+                        "application/json");
+                }
+                return;
+            }
             Tray t = load_tray_by_alias(env, alias);
             res.set_content(tray_to_json(t).dump(), "application/json");
         } catch (const std::exception& e) {
@@ -635,6 +680,7 @@ void run_server(SarekEnv&          env,
                 return true;
             });
 
+        svr.set_trusted_proxies(cfg.trusted_proxies);
         register_routes(svr, env, cfg, tok_tray, data_cache);
         g_active_svr.store(&svr, std::memory_order_release);
         if (!svr.bind_to_port("0.0.0.0", cfg.http_port))
@@ -645,6 +691,7 @@ void run_server(SarekEnv&          env,
     } else {
         // Plain HTTP (development / test only)
         httplib::Server svr;
+        svr.set_trusted_proxies(cfg.trusted_proxies);
         register_routes(svr, env, cfg, tok_tray, data_cache);
         g_active_svr.store(&svr, std::memory_order_release);
         if (!svr.bind_to_port("0.0.0.0", cfg.http_port))

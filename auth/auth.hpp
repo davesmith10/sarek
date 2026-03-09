@@ -44,6 +44,15 @@ TokenClaims validate_token(const std::vector<uint8_t>& wire,
 // Throws if the alias is not found or if the tray is PWENC-encrypted.
 Tray load_tray_by_alias(SarekEnv& env, const std::string& alias);
 
+// Returns true if the tray record for alias has enc == 1 (PWENC-encrypted).
+// Returns false if plain or if alias not found.
+bool is_tray_encrypted(SarekEnv& env, const std::string& alias);
+
+// Decrypt a PWENC-encrypted tray from the DB using the given password.
+// Throws if the alias is not found, not PWENC-encrypted, or the password is wrong.
+Tray load_tray_by_alias_pwenc(SarekEnv& env, const std::string& alias,
+                               const std::string& password);
+
 // Return the user record for username, or nullopt if not found.
 std::optional<UserRecord> load_user(SarekEnv& env, const std::string& username);
 

@@ -91,6 +91,9 @@ Tray get_tray_by_id(SarekEnv& env, const void* tray_uuid_16, size_t len = 16);
 // List all tray aliases owned by owner_user_id.
 std::vector<std::string> list_trays_for_user(SarekEnv& env, uint64_t owner_user_id);
 
+// List all tray aliases in the DB (admin view).
+std::vector<std::string> list_all_trays(SarekEnv& env);
+
 // ---------------------------------------------------------------------------
 // SecretService
 // ---------------------------------------------------------------------------

@@ -146,6 +146,41 @@ static std::vector<uint8_t> pwenc_encrypt(const std::vector<uint8_t>& plaintext,
 // Public API
 // ---------------------------------------------------------------------------
 
+std::vector<uint8_t> pwenc_decrypt_blob(const std::vector<uint8_t>& blob,
+                                         const std::string& password) {
+    PwBundle bundle = parse_pw_bundle(blob);
+    int level = bundle.level;
+    auto ksz = kyber_kem_sizes(level);
+
+    // 1. scrypt(password, salt) → wrap_key
+    uint8_t wrap_key[32];
+    run_scrypt(password, bundle.salt, 32,
+               bundle.scrypt_n_log2, bundle.scrypt_r, bundle.scrypt_p,
+               wrap_key, 32);
+
+    // 2. AES-256-GCM decrypt wrapped sk (no AAD)
+    auto sk = aes256gcm_decrypt(wrap_key, bundle.wrap_nonce_tag_sk_enc);
+    OPENSSL_cleanse(wrap_key, 32);
+    if (sk.size() != ksz.sk_bytes)
+        throw std::runtime_error("pwenc_decrypt_blob: unexpected sk size");
+
+    // 3. Kyber decaps(sk, ct) → ss
+    std::vector<uint8_t> ss(ksz.ss_bytes);
+    int rc = 0;
+    if      (level == 512)  rc = pqcrystals_kyber512_ref_dec(ss.data(), bundle.ct.data(), sk.data());
+    else if (level == 768)  rc = pqcrystals_kyber768_ref_dec(ss.data(), bundle.ct.data(), sk.data());
+    else                    rc = pqcrystals_kyber1024_ref_dec(ss.data(), bundle.ct.data(), sk.data());
+    OPENSSL_cleanse(sk.data(), sk.size());
+    if (rc != 0) throw std::runtime_error("pwenc_decrypt_blob: Kyber decaps failed");
+
+    // 4. AES-256-GCM decrypt data (AAD = pw_bundle_aad)
+    auto aad = pw_bundle_aad(level);
+    auto plaintext = aes256gcm_decrypt_aad(ss.data(), bundle.data_nonce_tag_ct,
+                                            aad.data(), aad.size());
+    OPENSSL_cleanse(ss.data(), ss.size());
+    return plaintext;
+}
+
 bool needs_bootstrap(const SarekConfig& cfg) {
     return !std::filesystem::exists(
         std::filesystem::path(cfg.db_path) / "__db.001");

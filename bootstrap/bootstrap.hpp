@@ -32,4 +32,12 @@ std::string hash_password(const std::string& plaintext, uint8_t n_log2 = 20);
 // internal error.
 bool verify_password(const std::string& plaintext, const std::string& stored_hash);
 
+// ── PWENC tray decryption ──────────────────────────────────────────────────
+
+// Decrypt a PWENC blob (as stored in DB:tray "bl" field for enc==1 records)
+// using the given password. Returns the raw tray_mp::pack bytes.
+// Throws std::runtime_error on bad password or corrupt data.
+std::vector<uint8_t> pwenc_decrypt_blob(const std::vector<uint8_t>& blob,
+                                         const std::string& password);
+
 } // namespace sarek

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 namespace sarek {
 
@@ -11,6 +12,7 @@ struct SarekConfig {
     std::string db_path;          // db.path
     int         http_port;        // http.port
     std::string admin_user;       // user.adminuser
+    std::vector<std::string> trusted_proxies; // http.trusted-proxies (optional)
 };
 
 // Throws std::runtime_error  if file is missing or a required field is absent.
