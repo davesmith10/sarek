@@ -2,6 +2,7 @@
 #include "db/db.hpp"
 #include "bootstrap/bootstrap.hpp"
 #include "http/http.hpp"
+#include "log/log.hpp"
 
 #include <csignal>
 #include <cstdlib>
@@ -80,22 +81,25 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cerr << "sarek: config loaded from " << config_path << "\n";
-    std::cerr << "sarek: db_path=" << cfg.db_path
-              << "  port=" << cfg.http_port << "\n";
+    // ── Initialize logging ────────────────────────────────────────────────────
+    sarek::init_logging("/var/log/sarek/sarek.log", dev_mode);
+    auto log = sarek::get_logger();
+
+    log->info("config loaded from {}", config_path);
+    log->info("db_path={} port={}", cfg.db_path, cfg.http_port);
 
     // ── Bootstrap or open DB ──────────────────────────────────────────────────
     std::unique_ptr<sarek::SarekEnv> env;
     try {
         if (sarek::needs_bootstrap(cfg)) {
-            std::cerr << "sarek: first-run bootstrap — creating database and system trays\n";
+            log->info("first-run bootstrap — creating database and system trays");
             env = sarek::run_bootstrap_interactive(cfg);
-            std::cerr << "sarek: bootstrap complete\n";
+            log->info("bootstrap complete");
         } else {
             env = std::make_unique<sarek::SarekEnv>(cfg.db_path);
         }
     } catch (const std::exception& e) {
-        std::cerr << "Startup failed: " << e.what() << "\n";
+        log->error("startup failed: {}", e.what());
         return 1;
     }
 
@@ -111,22 +115,20 @@ int main(int argc, char* argv[]) {
 
     // ── Start server ──────────────────────────────────────────────────────────
     if (cert_path.empty()) {
-        std::cerr << "sarek: starting plain-HTTP server on port "
-                  << cfg.http_port << " (development mode)\n";
+        log->info("starting plain-HTTP server on port {} (development mode)", cfg.http_port);
     } else {
-        std::cerr << "sarek: starting HTTPS server on port "
-                  << cfg.http_port << "\n";
+        log->info("starting HTTPS server on port {}", cfg.http_port);
     }
 
     try {
         sarek::run_server(*env, cfg, cert_path, key_path);
     } catch (const std::exception& e) {
-        std::cerr << "Server error: " << e.what() << "\n";
+        log->error("server error: {}", e.what());
         return 1;
     }
 
-    std::cerr << "sarek: shutting down — closing database\n";
+    log->info("shutting down — closing database");
     env.reset();   // explicit BDB close before process exit
-    std::cerr << "sarek: shutdown complete\n";
+    log->info("shutdown complete");
     return 0;
 }

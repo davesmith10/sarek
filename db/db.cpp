@@ -1,4 +1,5 @@
 #include "db.hpp"
+#include "log/log.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -168,6 +169,7 @@ void SarekTxn::commit() {
     txn_  = nullptr;
     done_ = true;
     bdb_check(ret, "SarekTxn::commit");
+    get_logger()->debug("db.txn.commit");
 }
 
 void SarekTxn::abort() {
@@ -175,6 +177,7 @@ void SarekTxn::abort() {
     txn_->abort(txn_);
     txn_  = nullptr;
     done_ = true;
+    get_logger()->warn("db.txn.abort");
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +189,12 @@ SarekEnv::SarekEnv(const std::string& path) {
 
     bdb_check(db_env_create(&env_, 0), "db_env_create");
 
+    // BDB error callback → spdlog
+    env_->set_errcall(env_, [](const DB_ENV*, const char* prefix, const char* msg) {
+        auto log = get_logger();
+        if (log) log->error("bdb: {} {}", prefix ? prefix : "", msg ? msg : "");
+    });
+
     constexpr u_int32_t flags =
         DB_CREATE | DB_INIT_MPOOL | DB_INIT_LOCK | DB_INIT_LOG | DB_INIT_TXN;
     int ret = env_->open(env_, path.c_str(), flags, 0664);
@@ -195,7 +204,12 @@ SarekEnv::SarekEnv(const std::string& path) {
         throw std::runtime_error(std::string("SarekEnv::open: ") + db_strerror(ret));
     }
 
+    get_logger()->info("db.open: path={}", path);
+
     try {
+        for (const char* name : {"tray", "tray_alias", "user", "data", "metadata", "path"})
+            get_logger()->info("db.open: database={}", name);
+
         open_db(tray_,       "tray");
         open_db(tray_alias_, "tray_alias");
         open_db(user_db_,    "user");
@@ -226,6 +240,8 @@ SarekEnv::~SarekEnv() {
         env_ = nullptr;
     }
     // SarekDb member destructors run after this body — close() is idempotent.
+    auto log = get_logger();
+    if (log) log->info("db.close");
 }
 
 void SarekEnv::open_db(SarekDb& db, const char* name) {

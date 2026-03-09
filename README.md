@@ -10,9 +10,10 @@
 2. [First-Run Bootstrap](#first-run-bootstrap)
 3. [TLS Setup](#tls-setup)
 4. [Running the Server](#running-the-server)
-5. [Authentication](#authentication)
-6. [API Reference](#api-reference)
-7. [curl Examples](#curl-examples)
+5. [Logging](#logging)
+6. [Authentication](#authentication)
+7. [API Reference](#api-reference)
+8. [curl Examples](#curl-examples)
 
 ---
 
@@ -154,6 +155,117 @@ sarek --config ./sarek.yml --dev
 ```
 
 `--cert` and `--key` must always be supplied together. `--dev` suppresses TLS regardless of whether `--cert`/`--key` are also present.
+
+---
+
+## Logging
+
+`sarek` uses [spdlog](https://github.com/gabime/spdlog) for structured logging. All server events are written to a rotating log file at INFO level.
+
+### Log file location
+
+```
+/var/log/sarek/sarek.log
+```
+
+The directory must exist before starting the server:
+
+```bash
+sudo mkdir -p /var/log/sarek
+sudo chown $(whoami) /var/log/sarek   # or the user sarek runs as
+```
+
+The log rotates automatically when it reaches **10 MB**, keeping the five most recent files:
+
+```
+/var/log/sarek/sarek.log        ← current
+/var/log/sarek/sarek.log.1
+/var/log/sarek/sarek.log.2
+/var/log/sarek/sarek.log.3
+/var/log/sarek/sarek.log.4
+```
+
+### Console output in development mode
+
+When started with `--dev`, log messages are also written to `stderr` in addition to the log file. Production runs (with `--cert`/`--key`) write only to the file.
+
+### Log format
+
+```
+[YYYY-MM-DD HH:MM:SS.mmm] [LEVEL] message
+```
+
+Example output:
+
+```
+[2026-03-09 14:22:01.043] [info ] config loaded from /etc/sarek.yml
+[2026-03-09 14:22:01.044] [info ] db_path=/var/lib/sarek port=8443
+[2026-03-09 14:22:01.312] [info ] db.open: path=/var/lib/sarek
+[2026-03-09 14:22:01.315] [info ] server started successfully on port 8443 (HTTPS)
+[2026-03-09 14:22:05.801] [info ] [cmd=login] user=admin addr=127.0.0.1
+[2026-03-09 14:22:06.112] [info ] [cmd=create] user=admin path=/team-a/db-password size=7 addr=127.0.0.1
+[2026-03-09 14:22:07.240] [info ] secret.decrypt: path=/team-a/db-password object_id=4831... tray=uuid... user=admin
+[2026-03-09 14:22:07.241] [info ] cache.put: object_id=4831... user=admin
+[2026-03-09 14:22:07.241] [info ] cache.state: entries=1
+[2026-03-09 14:22:07.800] [info ] [cmd=read] user=admin path=/team-a/db-password addr=127.0.0.1
+[2026-03-09 14:22:07.801] [debug] cache.hit: object_id=4831...
+```
+
+### Log levels
+
+| Level | Events |
+|-------|--------|
+| `info` | All REST commands, server lifecycle, bootstrap, DB open/close, tray/secret/user operations, cache state |
+| `warn` | Rejected login attempts (`[cmd=login] REJECTED`), unexpected transaction aborts (`db.txn.abort`), user lock operations |
+| `error` | Failed startup, config errors, BDB errors, unhandled server exceptions |
+| `debug` | Cache hits, transaction commits — high-frequency events omitted from normal output |
+
+All levels at `debug` and above are written to the log file. To filter interactively:
+
+```bash
+# Watch all INFO+ events in real time
+tail -f /var/log/sarek/sarek.log
+
+# Show only warnings and errors
+grep -E '\[(warn|error)\]' /var/log/sarek/sarek.log
+
+# Audit: all login events (success and failure)
+grep 'cmd=login' /var/log/sarek/sarek.log
+
+# Audit: all decrypt events (data access with user attribution)
+grep 'secret.decrypt' /var/log/sarek/sarek.log
+
+# Audit: all events for a specific user
+grep 'user=alice' /var/log/sarek/sarek.log
+```
+
+### What is logged
+
+Every REST command is logged with the authenticated username and client IP address. Sensitive values (passwords, tokens, secret data) are never logged.
+
+| Event | Level | Details logged |
+|-------|-------|----------------|
+| Login success | info | username, client IP |
+| Login failure | warn | username, client IP |
+| Logout | info | username, client IP |
+| Create user | info | creator, new username, client IP |
+| Invite user | info | creator, new username, client IP |
+| Change password | info | actor, target username, client IP |
+| List users | info | username, client IP |
+| Key generation | info | username, tray alias, tray type, client IP |
+| List/get/export tray | info | username, alias, client IP |
+| Create secret | info | username, vault path, size, client IP |
+| Read secret (decrypt) | info | vault path, object ID, tray ID, username |
+| Read secret (cache hit) | debug | object ID |
+| Cache population | info | object ID, username, total cache entries |
+| Create link | info | actor, link path, target path |
+| Create link | info | vault paths, username |
+| Health check | info | client IP |
+| DB open | info | environment path, each database name |
+| DB close | info | — |
+| BDB error | error | BDB prefix, message |
+| Server start/stop | info | port, protocol |
+| Bootstrap | info | lifecycle messages |
 
 ---
 

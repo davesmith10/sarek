@@ -3,6 +3,7 @@
 #include "vault/vault.hpp"
 #include "auth/auth.hpp"
 #include "bootstrap/user_record.hpp"
+#include "log/log.hpp"
 
 #include <crystals/base64.hpp>
 #include <crystals/tray.hpp>
@@ -173,6 +174,7 @@ static void register_routes(
 
     // ── POST /login ─────────────────────────────────────────────────────────
     svr.Post("/login", [&](const httplib::Request& req, httplib::Response& res) {
+        auto log = get_logger();
         try {
             auto body = json::parse(req.body);
             std::string username = body.at("username").get<std::string>();
@@ -180,8 +182,7 @@ static void register_routes(
 
             auto user_opt = authenticate_user(env, username, password);
             if (!user_opt) {
-                std::cerr << "sarek: login rejected: user=" << username
-                          << " addr=" << req.remote_addr << "\n";
+                log->warn("[cmd=login] REJECTED user={} addr={}", username, req.remote_addr);
                 res.status = 401;
                 res.set_content(jerr("invalid password"), "application/json");
                 return;
@@ -190,14 +191,12 @@ static void register_routes(
             auto wire  = issue_token(*user_opt, tok_tray);
             std::string token_b64 = base64_encode(wire.data(), wire.size());
 
-            std::cout << "sarek: login: user=" << username
-                      << " addr=" << req.remote_addr << std::endl;
+            log->info("[cmd=login] user={} addr={}", username, req.remote_addr);
 
             res.set_content(json{{"token", token_b64}, {"username", username}}.dump(),
                             "application/json");
         } catch (const std::exception& e) {
-            std::cerr << "sarek: login error: " << e.what()
-                      << " addr=" << req.remote_addr << "\n";
+            log->error("[cmd=login] error={} addr={}", e.what(), req.remote_addr);
             res.status = 400;
             res.set_content(jerr(e.what()), "application/json");
         }
@@ -208,6 +207,7 @@ static void register_routes(
     svr.Delete("/logout", [&](const httplib::Request& req, httplib::Response& res) {
         auto claims = try_auth(req, res, tok_tray);
         if (!claims) return;
+        get_logger()->info("[cmd=logout] user={} addr={}", claims->username, req.remote_addr);
         res.set_content(jok("logged out"), "application/json");
     });
 
@@ -243,6 +243,9 @@ static void register_routes(
             auto wire = issue_token(*user_opt, tok_tray);
             std::string token_b64 = base64_encode(wire.data(), wire.size());
 
+            get_logger()->info("[cmd=newuser] by={} new_user={} addr={}",
+                               claims->username, username, req.remote_addr);
+
             res.set_content(
                 json{{"token", token_b64}, {"username", username}}.dump(),
                 "application/json");
@@ -263,6 +266,8 @@ static void register_routes(
                 throw std::invalid_argument("password must not be empty");
 
             update_user_password(env, claims->username, new_password);
+            get_logger()->info("[cmd=changepass] by={} target={} addr={}",
+                               claims->username, claims->username, req.remote_addr);
             res.set_content(jok(), "application/json");
         } catch (const std::exception& e) {
             res.status = 400;
@@ -274,6 +279,7 @@ static void register_routes(
     svr.Get("/users", [&](const httplib::Request& req, httplib::Response& res) {
         auto claims = try_auth(req, res, tok_tray);
         if (!claims) return;
+        get_logger()->info("[cmd=listusers] by={} addr={}", claims->username, req.remote_addr);
         try {
             auto all = list_users(env);
             bool admin = is_admin(*claims);
@@ -323,6 +329,8 @@ static void register_routes(
             if (new_password.empty())
                 throw std::invalid_argument("password must not be empty");
             update_user_password(env, username, new_password);
+            get_logger()->info("[cmd=changepass] by={} target={} addr={}",
+                               claims->username, username, req.remote_addr);
             res.set_content(jok(), "application/json");
         } catch (const std::exception& e) {
             res.status = 400;
@@ -354,6 +362,9 @@ static void register_routes(
             uint64_t uid = generate_user_id(env);
             create_user(env, username, password, 0, assertions, uid);
 
+            get_logger()->info("[cmd=createuser] by={} new_user={} addr={}",
+                               claims->username, username, req.remote_addr);
+
             res.set_content(
                 json{{"username", username}, {"user_id", uid}}.dump(),
                 "application/json");
@@ -381,6 +392,9 @@ static void register_routes(
 
             store_tray(env, tray, user_opt->user_id);
 
+            get_logger()->info("[cmd=keygen] user={} alias={} type={} addr={}",
+                               claims->username, alias, type_s, req.remote_addr);
+
             res.set_content(tray_to_json(tray).dump(), "application/json");
         } catch (const std::exception& e) {
             res.status = 400;
@@ -392,6 +406,7 @@ static void register_routes(
     svr.Get("/trays", [&](const httplib::Request& req, httplib::Response& res) {
         auto claims = try_auth(req, res, tok_tray);
         if (!claims) return;
+        get_logger()->info("[cmd=listtrays] user={} addr={}", claims->username, req.remote_addr);
         try {
             std::vector<std::string> aliases;
             if (is_admin(*claims)) {
@@ -418,6 +433,8 @@ static void register_routes(
         if (!claims) return;
         try {
             std::string alias = req.matches[1].str();
+            get_logger()->info("[cmd=exporttray] user={} alias={} addr={}",
+                               claims->username, alias, req.remote_addr);
             Tray t = load_tray_by_alias(env, alias);
 
             // Ownership check: must be admin or own the tray
@@ -488,6 +505,8 @@ static void register_routes(
         if (!claims) return;
         try {
             std::string alias = req.matches[1].str();
+            get_logger()->info("[cmd=gettray] user={} alias={} addr={}",
+                               claims->username, alias, req.remote_addr);
             // If PWENC-encrypted: admin gets a prompt indicator; non-admin gets 403.
             if (is_tray_encrypted(env, alias)) {
                 if (!is_admin(*claims)) {
@@ -519,6 +538,9 @@ static void register_routes(
             res.set_content(jerr("access denied"), "application/json");
             return;
         }
+        get_logger()->info("[cmd=meta] user={} path={} addr={}",
+                           claims->username, path, req.remote_addr);
+        set_request_user(claims->username);
         try {
             MetadataRecord m = read_metadata(env, path);
             json o = {
@@ -547,6 +569,7 @@ static void register_routes(
             res.set_content(jerr("access denied"), "application/json");
             return;
         }
+        set_request_user(claims->username);
         try {
             // Tray alias comes from query param "tray"; defaults to "system-token"
             std::string tray_alias = req.has_param("tray")
@@ -557,8 +580,11 @@ static void register_routes(
             std::string mimetype = req.get_header_value("Content-Type");
             if (mimetype.empty()) mimetype = "application/octet-stream";
 
-            std::vector<uint8_t> body(req.body.begin(), req.body.end());
-            create_secret(env, path, body, tray, mimetype);
+            std::vector<uint8_t> body_bytes(req.body.begin(), req.body.end());
+            create_secret(env, path, body_bytes, tray, mimetype);
+
+            get_logger()->info("[cmd=create] user={} path={} size={} addr={}",
+                               claims->username, path, req.body.size(), req.remote_addr);
 
             res.status = 201;
             res.set_content(jok("created"), "application/json");
@@ -566,6 +592,7 @@ static void register_routes(
             res.status = 400;
             res.set_content(jerr(e.what()), "application/json");
         }
+        clear_request_user();
     });
 
     // ── GET /secrets/:path ───────────────────────────────────────────────────
@@ -578,6 +605,9 @@ static void register_routes(
             res.set_content(jerr("access denied"), "application/json");
             return;
         }
+        get_logger()->info("[cmd=read] user={} path={} addr={}",
+                           claims->username, path, req.remote_addr);
+        set_request_user(claims->username);
         try {
             // Get mimetype first for the Content-Type header
             MetadataRecord meta = read_metadata(env, path);
@@ -593,6 +623,7 @@ static void register_routes(
             res.status = 404;
             res.set_content(jerr(e.what()), "application/json");
         }
+        clear_request_user();
     });
 
     // ── GET /secrets ─────────────────────────────────────────────────────────
@@ -603,6 +634,9 @@ static void register_routes(
             std::string prefix = req.has_param("prefix")
                 ? req.get_param_value("prefix")
                 : "";
+
+            get_logger()->info("[cmd=secrets] user={} prefix={} addr={}",
+                               claims->username, prefix, req.remote_addr);
 
             // Scope filter: non-admin users see only paths they can access
             auto all = list_secrets(env, prefix);
@@ -621,6 +655,7 @@ static void register_routes(
     svr.Post("/links", [&](const httplib::Request& req, httplib::Response& res) {
         auto claims = try_auth(req, res, tok_tray);
         if (!claims) return;
+        set_request_user(claims->username);
         try {
             auto body = json::parse(req.body);
             std::string target = body.at("target").get<std::string>();
@@ -629,20 +664,25 @@ static void register_routes(
             if (!scope_allows(*claims, link) || !scope_allows(*claims, target)) {
                 res.status = 403;
                 res.set_content(jerr("access denied"), "application/json");
+                clear_request_user();
                 return;
             }
 
             create_link(env, target, link);
+            get_logger()->info("[cmd=link] user={} target={} link={} addr={}",
+                               claims->username, target, link, req.remote_addr);
             res.status = 201;
             res.set_content(jok("created"), "application/json");
         } catch (const std::exception& e) {
             res.status = 400;
             res.set_content(jerr(e.what()), "application/json");
         }
+        clear_request_user();
     });
 
     // ── Health check ─────────────────────────────────────────────────────────
-    svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
+    svr.Get("/health", [](const httplib::Request& req, httplib::Response& res) {
+        get_logger()->info("[cmd=health] addr={}", req.remote_addr);
         res.set_content(jok("healthy"), "application/json");
     });
 }
@@ -685,9 +725,10 @@ void run_server(SarekEnv&          env,
         g_active_svr.store(&svr, std::memory_order_release);
         if (!svr.bind_to_port("0.0.0.0", cfg.http_port))
             throw std::runtime_error("failed to bind to port " + std::to_string(cfg.http_port));
-        std::cerr << "sarek: server started successfully on port " << cfg.http_port << " (HTTPS)\n";
+        get_logger()->info("server started successfully on port {} (HTTPS)", cfg.http_port);
         svr.listen_after_bind();
         g_active_svr.store(nullptr, std::memory_order_release);
+        get_logger()->info("signal received — shutting down");
     } else {
         // Plain HTTP (development / test only)
         httplib::Server svr;
@@ -696,9 +737,10 @@ void run_server(SarekEnv&          env,
         g_active_svr.store(&svr, std::memory_order_release);
         if (!svr.bind_to_port("0.0.0.0", cfg.http_port))
             throw std::runtime_error("failed to bind to port " + std::to_string(cfg.http_port));
-        std::cerr << "sarek: server started successfully on port " << cfg.http_port << " (HTTP)\n";
+        get_logger()->info("server started successfully on port {} (HTTP)", cfg.http_port);
         svr.listen_after_bind();
         g_active_svr.store(nullptr, std::memory_order_release);
+        get_logger()->info("signal received — shutting down");
     }
 }
 

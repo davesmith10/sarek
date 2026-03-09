@@ -28,6 +28,28 @@ set(SCRYPT_KDF_INC /mnt/c/Users/daves/OneDrive/Desktop/Crystals/scrypt/libscrypt
 set(CRYSTALS_INC /usr/local/include)
 set(XKCP_INC /mnt/c/Users/daves/OneDrive/Desktop/Crystals/XKCP/bin/x86-64/libXKCP.so.headers)
 
+# ── spdlog (compiled for performance) ─────────────────────────────────────────
+set(SPDLOG_DIR /mnt/c/Users/daves/OneDrive/Desktop/SAREK/spdlog)
+set(SPDLOG_INC ${SPDLOG_DIR}/include)
+add_library(spdlog_compiled STATIC
+    ${SPDLOG_DIR}/src/spdlog.cpp
+    ${SPDLOG_DIR}/src/stdout_sinks.cpp
+    ${SPDLOG_DIR}/src/color_sinks.cpp
+    ${SPDLOG_DIR}/src/file_sinks.cpp
+    ${SPDLOG_DIR}/src/async.cpp
+    ${SPDLOG_DIR}/src/cfg.cpp
+    ${SPDLOG_DIR}/src/bundled_fmtlib_format.cpp
+)
+target_include_directories(spdlog_compiled PUBLIC ${SPDLOG_INC})
+target_compile_definitions(spdlog_compiled PUBLIC SPDLOG_COMPILED_LIB)
+target_compile_options(spdlog_compiled PRIVATE -w)   # suppress spdlog warnings
+
+# ── Module 0: log ──────────────────────────────────────────────────────────────
+add_library(sarek_log STATIC log/log.cpp)
+target_include_directories(sarek_log PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(sarek_log PUBLIC spdlog_compiled Threads::Threads)
+target_compile_options(sarek_log PRIVATE -Wall -Wextra)
+
 # ── Module 1: config ──────────────────────────────────────────────────────────
 add_library(sarek_config STATIC
     config/config.cpp
@@ -52,7 +74,7 @@ target_include_directories(sarek_db PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${BDB_INC}
 )
-target_link_libraries(sarek_db PUBLIC ${BDB_LIB})
+target_link_libraries(sarek_db PUBLIC ${BDB_LIB} sarek_log)
 target_compile_options(sarek_db PRIVATE -Wall -Wextra)
 
 add_executable(sarek_db_test
@@ -89,6 +111,7 @@ target_include_directories(sarek_bootstrap PRIVATE
 target_link_libraries(sarek_bootstrap PUBLIC
     sarek_config
     sarek_db
+    sarek_log
     ${CRYSTALS_LIB}
     ${XKCP_LIB}
     ${BLAKE3_LIB}
@@ -137,6 +160,7 @@ target_include_directories(sarek_vault PRIVATE
 )
 target_link_libraries(sarek_vault PUBLIC
     sarek_auth
+    sarek_log
     ${CRYSTALS_LIB}
     ${XKCP_LIB}
     ${BLAKE3_LIB}
@@ -161,6 +185,7 @@ target_include_directories(sarek_http PUBLIC
 )
 target_link_libraries(sarek_http PUBLIC
     sarek_vault
+    sarek_log
     OpenSSL::SSL
 )
 target_compile_options(sarek_http PRIVATE -Wall -Wextra)
@@ -169,5 +194,5 @@ target_compile_options(sarek_http PRIVATE -Wall -Wextra)
 add_executable(sarek
     main.cpp
 )
-target_link_libraries(sarek PRIVATE sarek_http)
+target_link_libraries(sarek PRIVATE sarek_http sarek_log)
 target_compile_options(sarek PRIVATE -Wall -Wextra)

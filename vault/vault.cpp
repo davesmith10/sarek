@@ -1,5 +1,6 @@
 #include "vault/vault.hpp"
 #include "bootstrap/user_record.hpp"
+#include "log/log.hpp"
 
 #include <crystals/ec_kem.hpp>
 #include <crystals/kyber_kem.hpp>
@@ -366,6 +367,8 @@ void create_user(SarekEnv& env,
 
     auto bytes = pack_user_record(rec);
     env.user().put(username, bytes);
+
+    get_logger()->info("user.create: username={} flags={:04x}", username, flags);
 }
 
 void lock_user(SarekEnv& env, const std::string& username) {
@@ -376,6 +379,8 @@ void lock_user(SarekEnv& env, const std::string& username) {
     UserRecord rec = unpack_user_record(*bytes);
     rec.flags |= kUserFlagLocked;
     env.user().put(username, pack_user_record(rec));
+
+    get_logger()->warn("user.lock: username={} by={}", username, get_request_user());
 }
 
 std::vector<std::pair<std::string, UserRecord>> list_users(SarekEnv& env) {
@@ -409,6 +414,8 @@ void update_user_password(SarekEnv& env,
     UserRecord rec = unpack_user_record(*bytes);
     rec.pwhash = hash_password(new_password, scrypt_n_log2);
     env.user().put(username, pack_user_record(rec));
+
+    get_logger()->info("user.changepass: username={} by={}", username, get_request_user());
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +438,8 @@ void store_tray(SarekEnv& env, const Tray& tray, uint64_t owner_user_id) {
     env.tray().put(uuid_bytes.data(), 16, record.data(), record.size(), txn.get());
     env.tray_alias().put(tray.alias, {uuid_bytes.begin(), uuid_bytes.end()}, txn.get());
     txn->commit();
+
+    get_logger()->info("tray.store: alias={} owner={}", tray.alias, owner_user_id);
 }
 
 Tray get_tray_by_id(SarekEnv& env, const void* tray_uuid_16, size_t len) {
@@ -522,6 +531,9 @@ void create_secret(SarekEnv&                  env,
         env.path().put(path, id_vec, txn.get());
     }
     txn->commit();
+
+    get_logger()->info("secret.create: path={} object_id={} tray={} size={} mime={}",
+                       path, object_id, tray.id, plaintext.size(), mimetype);
 }
 
 std::vector<uint8_t> read_secret(
@@ -541,7 +553,10 @@ std::vector<uint8_t> read_secret(
         // Check cache first
         if (data_cache) {
             auto cached = data_cache->get(object_id);
-            if (cached) return *cached;
+            if (cached) {
+                get_logger()->debug("cache.hit: object_id={}", object_id);
+                return *cached;
+            }
         }
 
         auto meta_bytes = env.metadata().get(object_id);
@@ -567,10 +582,16 @@ std::vector<uint8_t> read_secret(
             throw std::runtime_error("read_secret: missing data blob for object " +
                                      std::to_string(object_id));
 
+        get_logger()->info("secret.decrypt: path={} object_id={} tray={} user={}",
+                           current, object_id, meta.tray_id, get_request_user());
+
         auto plaintext = obiwan_decrypt(*encrypted, tray);
 
-        if (data_cache)
+        if (data_cache) {
             data_cache->put(object_id, plaintext);
+            get_logger()->info("cache.put: object_id={} user={}", object_id, get_request_user());
+            get_logger()->info("cache.state: entries={}", data_cache->size());
+        }
 
         return plaintext;
     }
@@ -637,6 +658,9 @@ void create_link(SarekEnv&          env,
         env.path().put(link_path, id_vec, txn.get());
     }
     txn->commit();
+
+    get_logger()->info("link.create: link={} -> target={} by={}",
+                       link_path, target_path, get_request_user());
 }
 
 } // namespace sarek
