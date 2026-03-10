@@ -790,4 +790,184 @@ DeleteUserResult delete_user(SarekEnv& env, const std::string& username) {
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// TokenService — manage_token DB helpers
+// ---------------------------------------------------------------------------
+// Record msgpack format (short keys):
+//   "u"  → username  (str)
+//   "c"  → created   (int64)
+//   "e"  → expiry    (int64)
+//   "r"  → revoked   (bool)
+
+static std::vector<uint8_t> pack_token_record(const TokenRecord& t) {
+    msgpack::sbuffer buf;
+    msgpack::packer<msgpack::sbuffer> pk(buf);
+    pk.pack_map(4);
+    pk.pack(std::string("u")); pk.pack(t.username);
+    pk.pack(std::string("c")); pk.pack_int64(t.created);
+    pk.pack(std::string("e")); pk.pack_int64(t.expiry);
+    pk.pack(std::string("r")); pk.pack(t.revoked);
+    return {reinterpret_cast<const uint8_t*>(buf.data()),
+            reinterpret_cast<const uint8_t*>(buf.data()) + buf.size()};
+}
+
+static TokenRecord unpack_token_record(const std::string& token_id,
+                                        const std::vector<uint8_t>& data) {
+    msgpack::object_handle oh = msgpack::unpack(
+        reinterpret_cast<const char*>(data.data()), data.size());
+    const msgpack::object& obj = oh.get();
+    if (obj.type != msgpack::type::MAP)
+        throw std::runtime_error("unpack_token_record: expected map");
+
+    TokenRecord t;
+    t.token_id = token_id;
+    const auto& map = obj.via.map;
+    for (uint32_t i = 0; i < map.size; ++i) {
+        const auto& kv = map.ptr[i];
+        if (kv.key.type != msgpack::type::STR) continue;
+        std::string key{kv.key.via.str.ptr, kv.key.via.str.size};
+        if (key == "u") {
+            t.username.assign(kv.val.via.str.ptr, kv.val.via.str.size);
+        } else if (key == "c") {
+            t.created = kv.val.as<int64_t>();
+        } else if (key == "e") {
+            t.expiry = kv.val.as<int64_t>();
+        } else if (key == "r") {
+            t.revoked = kv.val.as<bool>();
+        }
+    }
+    return t;
+}
+
+void register_token(SarekEnv& env,
+                    const std::string& token_id,
+                    const std::string& username,
+                    int64_t created,
+                    int64_t expiry) {
+    TokenRecord t;
+    t.token_id = token_id;
+    t.username = username;
+    t.created  = created;
+    t.expiry   = expiry;
+    t.revoked  = false;
+    auto packed = pack_token_record(t);
+    env.manage_token().put(token_id, packed);
+    get_logger()->info("token.register: token_id={} user={}", token_id, username);
+}
+
+TokenStatus check_token(SarekEnv& env, const std::string& token_id) {
+    auto bytes = env.manage_token().get(token_id);
+    if (!bytes) return TokenStatus::NotFound;
+    try {
+        auto t = unpack_token_record(token_id, *bytes);
+        return t.revoked ? TokenStatus::Revoked : TokenStatus::Valid;
+    } catch (...) {
+        return TokenStatus::NotFound;
+    }
+}
+
+bool revoke_token(SarekEnv& env, const std::string& token_id) {
+    auto bytes = env.manage_token().get(token_id);
+    if (!bytes) return false;
+    auto t = unpack_token_record(token_id, *bytes);
+    t.revoked = true;
+    auto packed = pack_token_record(t);
+    env.manage_token().put(token_id, packed);
+    get_logger()->info("token.revoke: token_id={} user={}", token_id, t.username);
+    return true;
+}
+
+int revoke_tokens_for_user(SarekEnv& env, const std::string& username) {
+    // Collect token_ids for this user via scan
+    std::vector<std::string> to_revoke;
+    env.manage_token().scan(nullptr,
+        [&](const void* k, size_t ksz, const void* v, size_t vsz) -> bool {
+            std::string tid(reinterpret_cast<const char*>(k), ksz);
+            std::vector<uint8_t> data(
+                reinterpret_cast<const uint8_t*>(v),
+                reinterpret_cast<const uint8_t*>(v) + vsz);
+            try {
+                auto t = unpack_token_record(tid, data);
+                if (t.username == username && !t.revoked)
+                    to_revoke.push_back(tid);
+            } catch (...) {}
+            return true;
+        });
+
+    for (const auto& tid : to_revoke) {
+        auto bytes = env.manage_token().get(tid);
+        if (!bytes) continue;
+        auto t = unpack_token_record(tid, *bytes);
+        t.revoked = true;
+        env.manage_token().put(tid, pack_token_record(t));
+    }
+    get_logger()->warn("token.revoke_user: username={} count={}", username, to_revoke.size());
+    return static_cast<int>(to_revoke.size());
+}
+
+int revoke_all_tokens(SarekEnv& env) {
+    std::vector<std::pair<std::string, TokenRecord>> all;
+    env.manage_token().scan(nullptr,
+        [&](const void* k, size_t ksz, const void* v, size_t vsz) -> bool {
+            std::string tid(reinterpret_cast<const char*>(k), ksz);
+            std::vector<uint8_t> data(
+                reinterpret_cast<const uint8_t*>(v),
+                reinterpret_cast<const uint8_t*>(v) + vsz);
+            try {
+                auto t = unpack_token_record(tid, data);
+                if (!t.revoked) all.emplace_back(tid, t);
+            } catch (...) {}
+            return true;
+        });
+
+    for (auto& [tid, t] : all) {
+        t.revoked = true;
+        env.manage_token().put(tid, pack_token_record(t));
+    }
+    get_logger()->warn("token.revoke_all: count={}", all.size());
+    return static_cast<int>(all.size());
+}
+
+std::vector<TokenRecord> list_tokens(SarekEnv& env) {
+    std::vector<TokenRecord> result;
+    env.manage_token().scan(nullptr,
+        [&](const void* k, size_t ksz, const void* v, size_t vsz) -> bool {
+            std::string tid(reinterpret_cast<const char*>(k), ksz);
+            std::vector<uint8_t> data(
+                reinterpret_cast<const uint8_t*>(v),
+                reinterpret_cast<const uint8_t*>(v) + vsz);
+            try {
+                result.push_back(unpack_token_record(tid, data));
+            } catch (...) {}
+            return true;
+        });
+    return result;
+}
+
+int purge_expired_tokens(SarekEnv& env) {
+    int64_t now = static_cast<int64_t>(std::time(nullptr));
+    std::vector<std::string> to_delete;
+
+    env.manage_token().scan(nullptr,
+        [&](const void* k, size_t ksz, const void* v, size_t vsz) -> bool {
+            std::string tid(reinterpret_cast<const char*>(k), ksz);
+            std::vector<uint8_t> data(
+                reinterpret_cast<const uint8_t*>(v),
+                reinterpret_cast<const uint8_t*>(v) + vsz);
+            try {
+                auto t = unpack_token_record(tid, data);
+                if (t.expiry < now)
+                    to_delete.push_back(tid);
+            } catch (...) {}
+            return true;
+        });
+
+    for (const auto& tid : to_delete)
+        env.manage_token().del(tid);
+
+    if (!to_delete.empty())
+        get_logger()->info("token.purge_expired: count={}", to_delete.size());
+    return static_cast<int>(to_delete.size());
+}
+
 } // namespace sarek

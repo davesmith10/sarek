@@ -12,9 +12,10 @@
 4. [Running the Server](#running-the-server)
 5. [Logging](#logging)
 6. [Authentication](#authentication)
-7. [API Reference](#api-reference)
-8. [YAML Secret Extraction](#yaml-secret-extraction)
-9. [curl Examples](#curl-examples)
+7. [Token Revocation](#token-revocation)
+8. [API Reference](#api-reference)
+9. [YAML Secret Extraction](#yaml-secret-extraction)
+10. [curl Examples](#curl-examples)
 
 ---
 
@@ -216,8 +217,8 @@ Example output:
 
 | Level | Events |
 |-------|--------|
-| `info` | All REST commands, server lifecycle, bootstrap, DB open/close, tray/secret/user operations, cache state |
-| `warn` | Rejected login attempts (`[cmd=login] REJECTED`), unexpected transaction aborts (`db.txn.abort`), user lock operations |
+| `info` | All REST commands, server lifecycle, bootstrap, DB open/close, tray/secret/user operations, cache state, token registration, single-token revocation, expired-token purge |
+| `warn` | Rejected login attempts (`[cmd=login] REJECTED`), unexpected transaction aborts (`db.txn.abort`), user lock operations, revoked/not-found token use, bulk token revocation (`revoke-tokens`, `revoke-all`) |
 | `error` | Failed startup, config errors, BDB errors, unhandled server exceptions |
 | `debug` | Cache hits, transaction commits — high-frequency events omitted from normal output |
 
@@ -261,6 +262,13 @@ Every REST command is logged with the authenticated username and client IP addre
 | Cache population | info | object ID, username, total cache entries |
 | Create link | info | actor, link path, target path |
 | Create link | info | vault paths, username |
+| Token registered at login | info | token_id, username |
+| Token used after revocation | warn | token_id, username |
+| Token used but not found in DB | warn | token_id, username |
+| Single token revoked | info | token_id |
+| All tokens for user revoked | warn | username, count |
+| All tokens revoked | warn | count |
+| Expired tokens purged (hourly) | info | count |
 | Health check | info | client IP |
 | DB open | info | environment path, each database name |
 | DB close | info | — |
@@ -280,7 +288,32 @@ Tokens are raw binary, returned base64-encoded in the `token` field. Pass them b
 Authorization: Bearer <base64-encoded token>
 ```
 
-Tokens are signed with the `system-token` tray (ECDSA P-256 + Dilithium). The server verifies the signature and checks the `usr:<username>` assertion on every request.
+Tokens are signed with the `system-token` tray (ECDSA P-256 + Dilithium). The server verifies the signature, checks the `usr:<username>` assertion, and then checks the `manage_token` database for revocation on every authenticated request.
+
+---
+
+## Token Revocation
+
+The server tracks every issued token in a `manage_token` BDB database (keyed by the token's UUID). On each authenticated request the token's revocation status is checked after signature verification.
+
+| Status | HTTP response |
+|--------|---------------|
+| Valid (found, not revoked) | Request proceeds normally |
+| Not found in DB | `401 {"error":"invalid token, please login"}` |
+| Found and revoked | `401 {"error":"token revoked, please login"}` |
+
+When a client (amanda) receives either of these specific 401 messages it automatically deletes `$HOME/.sarek` so the user is prompted to re-login on the next command.
+
+**Issued token lifetime**: tokens expire after 24 hours. Expired records are purged from the `manage_token` database by a background thread that runs every hour.
+
+**Admin revocation routes** (see [API Reference](#api-reference) below):
+
+| Operation | Endpoint |
+|-----------|----------|
+| List all tokens | `GET /admin/tokens` |
+| Revoke one token | `DELETE /admin/tokens/:token_id` |
+| Revoke all tokens for one user | `DELETE /admin/tokens?username=<name>` |
+| Revoke all tokens | `DELETE /admin/tokens` |
 
 ---
 
@@ -480,6 +513,60 @@ Unauthenticated liveness check.
 
 ---
 
+### `GET /admin/tokens` *(admin only)*
+
+List all issued tokens with their status.
+
+**Response `200`:** JSON array:
+```json
+[
+  {
+    "token_id": "a1b2c3d4-e5f6-4abc-8def-1234567890ab",
+    "username": "alice",
+    "created":  1741694400,
+    "expiry":   1741780800,
+    "revoked":  false
+  }
+]
+```
+
+---
+
+### `DELETE /admin/tokens/:token_id` *(admin only)*
+
+Revoke a single token by UUID.
+
+**Response `200`:**
+```json
+{ "revoked": "a1b2c3d4-e5f6-4abc-8def-1234567890ab" }
+```
+
+**Response `404`:** Token not found.
+
+---
+
+### `DELETE /admin/tokens?username=<name>` *(admin only)*
+
+Revoke all active tokens for one user.
+
+**Response `200`:**
+```json
+{ "revoked": 2, "username": "alice" }
+```
+
+---
+
+### `DELETE /admin/tokens` *(admin only)*
+
+Revoke all active tokens in the system. All users must re-login.
+
+**Response `200`:**
+```json
+{ "revoked": 7, "message": "all tokens revoked" }
+```
+
+---
+
 ## YAML Secret Extraction
 
 The server can extract a single value from a stored YAML secret without requiring the client to download and parse the full document. This is useful when a secret stores a structured credentials file and you need only one field — for example, pulling a password out of a multi-key YAML record.
@@ -654,6 +741,35 @@ curl $CACERT "$HOST/trays" \
 
 ```bash
 curl $CACERT -X DELETE "$HOST/logout" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### List all tokens (admin)
+
+```bash
+curl $CACERT "$HOST/admin/tokens" \
+  -H "Authorization: Bearer $TOKEN" | jq .
+```
+
+### Revoke a single token (admin)
+
+```bash
+TOKEN_ID="a1b2c3d4-e5f6-4abc-8def-1234567890ab"
+curl $CACERT -X DELETE "$HOST/admin/tokens/$TOKEN_ID" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Revoke all tokens for a user (admin)
+
+```bash
+curl $CACERT -X DELETE "$HOST/admin/tokens?username=alice" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Revoke all tokens (admin)
+
+```bash
+curl $CACERT -X DELETE "$HOST/admin/tokens" \
   -H "Authorization: Bearer $TOKEN"
 ```
 

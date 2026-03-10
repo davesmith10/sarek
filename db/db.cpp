@@ -213,19 +213,21 @@ SarekEnv::SarekEnv(const std::string& path) {
     get_logger()->info("db.open: path={}", path);
 
     try {
-        for (const char* name : {"tray", "tray_alias", "user", "data", "metadata", "path"})
+        for (const char* name : {"tray", "tray_alias", "user", "data", "metadata", "path", "manage_token"})
             get_logger()->info("db.open: database={}", name);
 
-        open_db(tray_,       "tray");
-        open_db(tray_alias_, "tray_alias");
-        open_db(user_db_,    "user");
-        open_db(data_,       "data");
-        open_db(metadata_,   "metadata");
-        open_db(path_db_,    "path");
+        open_db(tray_,             "tray");
+        open_db(tray_alias_,       "tray_alias");
+        open_db(user_db_,          "user");
+        open_db(data_,             "data");
+        open_db(metadata_,         "metadata");
+        open_db(path_db_,          "path");
+        open_db(manage_token_db_,  "manage_token");
     } catch (...) {
         // Close any that opened successfully before re-throwing.
         tray_.close(); tray_alias_.close(); user_db_.close();
         data_.close(); metadata_.close();   path_db_.close();
+        manage_token_db_.close();
         env_->close(env_, 0);
         env_ = nullptr;
         throw;
@@ -240,6 +242,7 @@ SarekEnv::~SarekEnv() {
     data_.close();
     metadata_.close();
     path_db_.close();
+    manage_token_db_.close();
 
     if (env_) {
         env_->close(env_, 0);

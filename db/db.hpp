@@ -116,12 +116,13 @@ public:
     std::unique_ptr<SarekTxn> begin_txn();
 
     // Named database accessors
-    SarekDb& tray()       { return tray_; }
-    SarekDb& tray_alias() { return tray_alias_; }
-    SarekDb& user()       { return user_db_; }
-    SarekDb& data()       { return data_; }
-    SarekDb& metadata()   { return metadata_; }
-    SarekDb& path()       { return path_db_; }
+    SarekDb& tray()         { return tray_; }
+    SarekDb& tray_alias()   { return tray_alias_; }
+    SarekDb& user()         { return user_db_; }
+    SarekDb& data()         { return data_; }
+    SarekDb& metadata()     { return metadata_; }
+    SarekDb& path()         { return path_db_; }
+    SarekDb& manage_token() { return manage_token_db_; }
 
 private:
     void open_db(SarekDb& db, const char* name);
@@ -134,6 +135,7 @@ private:
     SarekDb data_;
     SarekDb metadata_;
     SarekDb path_db_;
+    SarekDb manage_token_db_;
 };
 
 } // namespace sarek

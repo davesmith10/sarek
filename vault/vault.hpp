@@ -127,6 +127,45 @@ void create_link(SarekEnv&          env,
                  const std::string& link_path);
 
 // ---------------------------------------------------------------------------
+// TokenRecord / TokenStatus / TokenService
+// ---------------------------------------------------------------------------
+
+struct TokenRecord {
+    std::string token_id;   // hex UUID string (36 chars)
+    std::string username;
+    int64_t     created = 0;   // unix epoch seconds
+    int64_t     expiry  = 0;   // unix epoch seconds
+    bool        revoked = false;
+};
+
+enum class TokenStatus { Valid, NotFound, Revoked };
+
+// Register a newly issued token in manage_token DB.
+void register_token(SarekEnv& env,
+                    const std::string& token_id,
+                    const std::string& username,
+                    int64_t created,
+                    int64_t expiry);
+
+// Check revocation status of a token by its UUID string.
+TokenStatus check_token(SarekEnv& env, const std::string& token_id);
+
+// Revoke a single token by UUID string. Returns false if not found.
+bool revoke_token(SarekEnv& env, const std::string& token_id);
+
+// Revoke all tokens for a given username. Returns count revoked.
+int revoke_tokens_for_user(SarekEnv& env, const std::string& username);
+
+// Revoke all tokens. Returns count revoked.
+int revoke_all_tokens(SarekEnv& env);
+
+// List all token records (admin view).
+std::vector<TokenRecord> list_tokens(SarekEnv& env);
+
+// Delete records where expiry < now. Called by background cleanup thread.
+int purge_expired_tokens(SarekEnv& env);
+
+// ---------------------------------------------------------------------------
 // Admin operations
 // ---------------------------------------------------------------------------
 

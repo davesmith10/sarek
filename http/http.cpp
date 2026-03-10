@@ -16,7 +16,12 @@
 #include <openssl/ssl.h>
 #include <openssl/rand.h>
 
+#include <crystals/token_format.hpp>
+
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <ctime>
 #include <unistd.h>
 #include <optional>
@@ -29,6 +34,11 @@ using json = nlohmann::json;
 // Active server instance; set by run_server(), read by request_shutdown().
 static std::atomic<httplib::Server*> g_active_svr{nullptr};
 
+// Background cleanup thread control
+static std::atomic<bool>      g_cleanup_stop{false};
+static std::condition_variable g_cleanup_cv;
+static std::mutex              g_cleanup_mu;
+
 namespace sarek {
 
 void request_shutdown() {
@@ -36,9 +46,30 @@ void request_shutdown() {
     (void)write(STDOUT_FILENO, msg, sizeof(msg) - 1);
     httplib::Server* svr = g_active_svr.load(std::memory_order_acquire);
     if (svr) svr->stop();
+    // Wake up the cleanup thread so it can exit promptly
+    {
+        std::lock_guard<std::mutex> lk(g_cleanup_mu);
+        g_cleanup_stop = true;
+    }
+    g_cleanup_cv.notify_all();
 }
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// UUID format helper
+// ---------------------------------------------------------------------------
+
+static std::string fmt_uuid(const uint8_t uuid[16]) {
+    char buf[37];
+    std::snprintf(buf, sizeof(buf),
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        uuid[0],  uuid[1],  uuid[2],  uuid[3],
+        uuid[4],  uuid[5],  uuid[6],  uuid[7],
+        uuid[8],  uuid[9],  uuid[10], uuid[11],
+        uuid[12], uuid[13], uuid[14], uuid[15]);
+    return buf;
+}
 
 // ---------------------------------------------------------------------------
 // JSON helpers
@@ -70,10 +101,29 @@ static std::vector<uint8_t> extract_bearer(const httplib::Request& req) {
 // Validate Bearer token; on failure sets res to 401 and returns nullopt.
 static std::optional<TokenClaims> try_auth(
         const httplib::Request& req, httplib::Response& res,
-        const Tray& tok_tray) {
+        const Tray& tok_tray,
+        SarekEnv& env) {
     try {
-        auto wire = extract_bearer(req);
-        return validate_token(wire, tok_tray);
+        auto wire   = extract_bearer(req);
+        auto claims = validate_token(wire, tok_tray);
+
+        // Check revocation in manage_token DB
+        auto status = check_token(env, claims.token_uuid);
+        if (status == TokenStatus::NotFound) {
+            get_logger()->warn("token.not_found: token_id={} user={}",
+                               claims.token_uuid, claims.username);
+            res.status = 401;
+            res.set_content(jerr("invalid token, please login"), "application/json");
+            return std::nullopt;
+        }
+        if (status == TokenStatus::Revoked) {
+            get_logger()->warn("token.revoked: token_id={} user={}",
+                               claims.token_uuid, claims.username);
+            res.status = 401;
+            res.set_content(jerr("token revoked, please login"), "application/json");
+            return std::nullopt;
+        }
+        return claims;
     } catch (const std::exception& e) {
         res.status = 401;
         res.set_content(jerr(e.what()), "application/json");
@@ -192,6 +242,15 @@ static void register_routes(
             auto wire  = issue_token(*user_opt, tok_tray);
             std::string token_b64 = base64_encode(wire.data(), wire.size());
 
+            // Register token in manage_token DB for revocation tracking
+            try {
+                Token tok = token_unpack(wire);
+                std::string tid = fmt_uuid(tok.token_uuid);
+                register_token(env, tid, username, tok.issued_at, tok.expires_at);
+            } catch (const std::exception& ex) {
+                log->error("[cmd=login] token_register failed: {}", ex.what());
+            }
+
             log->info("[cmd=login] user={} addr={}", username, req.remote_addr);
 
             res.set_content(json{{"token", token_b64}, {"username", username}}.dump(),
@@ -206,7 +265,7 @@ static void register_routes(
     // ── DELETE /logout ───────────────────────────────────────────────────────
     // Stateless: server has no session state; client deletes its token file.
     svr.Delete("/logout", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         get_logger()->info("[cmd=logout] user={} addr={}", claims->username, req.remote_addr);
         res.set_content(jok("logged out"), "application/json");
@@ -215,7 +274,7 @@ static void register_routes(
     // ── POST /users/invite  (admin only) ─────────────────────────────────────
     // Creates a user with no password and returns a signed token for the new user.
     svr.Post("/users/invite", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         if (!is_admin(*claims)) {
             get_logger()->warn("[cmd=newuser] admin required user={} addr={}",
@@ -246,6 +305,15 @@ static void register_routes(
             auto wire = issue_token(*user_opt, tok_tray);
             std::string token_b64 = base64_encode(wire.data(), wire.size());
 
+            // Register invite token for revocation tracking
+            try {
+                Token tok = token_unpack(wire);
+                std::string tid = fmt_uuid(tok.token_uuid);
+                register_token(env, tid, username, tok.issued_at, tok.expires_at);
+            } catch (const std::exception& ex) {
+                get_logger()->error("[cmd=newuser] token_register failed: {}", ex.what());
+            }
+
             get_logger()->info("[cmd=newuser] by={} new_user={} addr={}",
                                claims->username, username, req.remote_addr);
 
@@ -260,7 +328,7 @@ static void register_routes(
 
     // ── POST /users/password  (authenticated user, sets own password) ─────────
     svr.Post("/users/password", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         try {
             auto body = json::parse(req.body);
@@ -280,7 +348,7 @@ static void register_routes(
 
     // ── GET /users ───────────────────────────────────────────────────────────
     svr.Get("/users", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         get_logger()->info("[cmd=listusers] by={} addr={}", claims->username, req.remote_addr);
         try {
@@ -318,7 +386,7 @@ static void register_routes(
 
     // ── POST /users/:username/password ───────────────────────────────────────
     svr.Post(R"(/users/([^/]+)/password)", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         std::string username = req.matches[1].str();
         if (claims->username != username && !is_admin(*claims)) {
@@ -345,7 +413,7 @@ static void register_routes(
 
     // ── DELETE /users/:username  (admin only) ────────────────────────────────
     svr.Delete(R"(/users/([^/]+))", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         if (!is_admin(*claims)) {
             get_logger()->warn("[cmd=deluser] admin required user={} addr={}",
@@ -393,7 +461,7 @@ static void register_routes(
 
     // ── DELETE /admin/flush  (admin only) ────────────────────────────────────
     svr.Delete("/admin/flush", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         if (!is_admin(*claims)) {
             get_logger()->warn("[cmd=flush] admin required user={} addr={}",
@@ -426,7 +494,7 @@ static void register_routes(
 
     // ── POST /users  (admin only) ────────────────────────────────────────────
     svr.Post("/users", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         if (!is_admin(*claims)) {
             get_logger()->warn("[cmd=createuser] admin required user={} addr={}",
@@ -464,7 +532,7 @@ static void register_routes(
 
     // ── POST /trays ──────────────────────────────────────────────────────────
     svr.Post("/trays", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         try {
             auto body  = json::parse(req.body);
@@ -492,7 +560,7 @@ static void register_routes(
 
     // ── GET /trays ───────────────────────────────────────────────────────────
     svr.Get("/trays", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         get_logger()->info("[cmd=listtrays] user={} addr={}", claims->username, req.remote_addr);
         try {
@@ -517,7 +585,7 @@ static void register_routes(
     // Returns tray JSON including sk_b64 for all slots. Owner or admin only.
     // Registered before /trays/:alias so it matches first.
     svr.Get(R"(/trays/([^/]+)/export)", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         try {
             std::string alias = req.matches[1].str();
@@ -570,7 +638,7 @@ static void register_routes(
     // ── POST /trays/:alias/view  (admin only, decrypts PWENC tray) ───────────
     // Registered before GET /trays/:alias so the regex matches first.
     svr.Post(R"(/trays/([^/]+)/view)", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         if (!is_admin(*claims)) {
             get_logger()->warn("[cmd=viewtray] admin required user={} addr={}",
@@ -593,7 +661,7 @@ static void register_routes(
 
     // ── GET /trays/:alias ────────────────────────────────────────────────────
     svr.Get(R"(/trays/([^/]+))", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         try {
             std::string alias = req.matches[1].str();
@@ -624,7 +692,7 @@ static void register_routes(
     // ── GET /secrets/:path/meta ──────────────────────────────────────────────
     // (registered before /secrets/:path to win regex priority)
     svr.Get(R"(/secrets/(.+)/meta)", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         std::string path = "/" + req.matches[1].str();
         if (!scope_allows(*claims, path)) {
@@ -659,7 +727,7 @@ static void register_routes(
     // ── GET /secrets/:path/yaml-extract ──────────────────────────────────────
     // (registered before /secrets/:path to win regex priority)
     svr.Get(R"(/secrets/(.+)/yaml-extract)", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         std::string path = "/" + req.matches[1].str();
         if (!scope_allows(*claims, path)) {
@@ -739,7 +807,7 @@ static void register_routes(
 
     // ── POST /secrets/:path ──────────────────────────────────────────────────
     svr.Post(R"(/secrets/(.+))", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         std::string path = "/" + req.matches[1].str();
         if (!scope_allows(*claims, path)) {
@@ -780,7 +848,7 @@ static void register_routes(
 
     // ── GET /secrets/:path ───────────────────────────────────────────────────
     svr.Get(R"(/secrets/(.+))", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         std::string path = "/" + req.matches[1].str();
         if (!scope_allows(*claims, path)) {
@@ -813,7 +881,7 @@ static void register_routes(
 
     // ── GET /secrets ─────────────────────────────────────────────────────────
     svr.Get("/secrets", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         try {
             std::string prefix = req.has_param("prefix")
@@ -838,7 +906,7 @@ static void register_routes(
 
     // ── POST /links ──────────────────────────────────────────────────────────
     svr.Post("/links", [&](const httplib::Request& req, httplib::Response& res) {
-        auto claims = try_auth(req, res, tok_tray);
+        auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
         set_request_user(claims->username);
         try {
@@ -867,6 +935,99 @@ static void register_routes(
         clear_request_user();
     });
 
+    // ── GET /admin/tokens  (admin only) ─────────────────────────────────────
+    svr.Get("/admin/tokens", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray, env);
+        if (!claims) return;
+        if (!is_admin(*claims)) {
+            get_logger()->warn("[cmd=list-tokens] admin required user={} addr={}",
+                               claims->username, req.remote_addr);
+            res.status = 403;
+            res.set_content(jerr("admin required"), "application/json");
+            return;
+        }
+        try {
+            auto tokens = list_tokens(env);
+            json arr = json::array();
+            for (const auto& t : tokens) {
+                arr.push_back({
+                    {"token_id", t.token_id},
+                    {"username", t.username},
+                    {"created",  t.created},
+                    {"expiry",   t.expiry},
+                    {"revoked",  t.revoked}
+                });
+            }
+            res.set_content(arr.dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
+    // ── DELETE /admin/tokens/:token_id  (admin only) ─────────────────────
+    // Also handles DELETE /admin/tokens?username=<name> and DELETE /admin/tokens
+    svr.Delete("/admin/tokens", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray, env);
+        if (!claims) return;
+        if (!is_admin(*claims)) {
+            get_logger()->warn("[cmd=revoke-tokens] admin required user={} addr={}",
+                               claims->username, req.remote_addr);
+            res.status = 403;
+            res.set_content(jerr("admin required"), "application/json");
+            return;
+        }
+        try {
+            if (req.has_param("username")) {
+                std::string username = req.get_param_value("username");
+                int count = revoke_tokens_for_user(env, username);
+                get_logger()->warn("[cmd=revoke-tokens] by={} target_user={} count={} addr={}",
+                                   claims->username, username, count, req.remote_addr);
+                res.set_content(
+                    json{{"revoked", count}, {"username", username}}.dump(),
+                    "application/json");
+            } else {
+                int count = revoke_all_tokens(env);
+                get_logger()->warn("[cmd=revoke-all] by={} count={} addr={}",
+                                   claims->username, count, req.remote_addr);
+                res.set_content(
+                    json{{"revoked", count}, {"message", "all tokens revoked"}}.dump(),
+                    "application/json");
+            }
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
+    svr.Delete(R"(/admin/tokens/([^/]+))", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray, env);
+        if (!claims) return;
+        if (!is_admin(*claims)) {
+            get_logger()->warn("[cmd=revoke-token] admin required user={} addr={}",
+                               claims->username, req.remote_addr);
+            res.status = 403;
+            res.set_content(jerr("admin required"), "application/json");
+            return;
+        }
+        std::string token_id = req.matches[1].str();
+        try {
+            bool ok = revoke_token(env, token_id);
+            if (!ok) {
+                res.status = 404;
+                res.set_content(jerr("token not found"), "application/json");
+                return;
+            }
+            get_logger()->info("[cmd=revoke-token] by={} token_id={} addr={}",
+                               claims->username, token_id, req.remote_addr);
+            res.set_content(
+                json{{"revoked", token_id}}.dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
     // ── Health check ─────────────────────────────────────────────────────────
     svr.Get("/health", [](const httplib::Request& req, httplib::Response& res) {
         get_logger()->info("[cmd=health] addr={}", req.remote_addr);
@@ -889,6 +1050,23 @@ void run_server(SarekEnv&          env,
 
     // Shared data cache
     LruCache<uint64_t, std::vector<uint8_t>> data_cache(1024, cfg.cache_ttl_secs);
+
+    // Background cleanup thread: purge expired tokens every hour
+    g_cleanup_stop = false;
+    std::thread cleanup_thread([&env]() {
+        while (!g_cleanup_stop) {
+            std::unique_lock<std::mutex> lk(g_cleanup_mu);
+            g_cleanup_cv.wait_for(lk, std::chrono::hours(1),
+                                  []{ return g_cleanup_stop.load(); });
+            if (g_cleanup_stop) break;
+            try {
+                int n = purge_expired_tokens(env);
+                get_logger()->info("token.purge_expired: background count={}", n);
+            } catch (const std::exception& e) {
+                get_logger()->error("token.purge_expired: error={}", e.what());
+            }
+        }
+    });
 
     if (!cert_path.empty() && !key_path.empty()) {
         // HTTPS path: capture by value for the setup callback
@@ -929,6 +1107,15 @@ void run_server(SarekEnv&          env,
         g_active_svr.store(nullptr, std::memory_order_release);
         get_logger()->info("signal received — shutting down");
     }
+
+    // Stop and join background cleanup thread
+    {
+        std::lock_guard<std::mutex> lk(g_cleanup_mu);
+        g_cleanup_stop = true;
+    }
+    g_cleanup_cv.notify_all();
+    if (cleanup_thread.joinable())
+        cleanup_thread.join();
 }
 
 } // namespace sarek
