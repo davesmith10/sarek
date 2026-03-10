@@ -36,6 +36,11 @@ void init_logging(const std::string& log_file, bool console) {
 }
 
 std::shared_ptr<spdlog::logger> get_logger() {
+    if (!g_logger) {
+        // Fallback: stderr logger for tests and early startup (before init_logging).
+        g_logger = spdlog::stderr_color_mt("sarek");
+        g_logger->set_level(spdlog::level::warn);
+    }
     return g_logger;
 }
 

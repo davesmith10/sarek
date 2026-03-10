@@ -17,6 +17,7 @@ namespace sarek {
 struct TokenClaims {
     std::string              username;
     std::vector<std::string> assertions;
+    std::string              token_uuid;  // hex UUID v4, e.g. "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
 };
 
 // ---------------------------------------------------------------------------

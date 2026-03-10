@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include <httplib.h>
+#include <libfyaml.h>
 
 #include <openssl/ssl.h>
 #include <openssl/rand.h>
@@ -653,6 +654,87 @@ static void register_routes(
             res.status = 404;
             res.set_content(jerr(e.what()), "application/json");
         }
+    });
+
+    // ── GET /secrets/:path/yaml-extract ──────────────────────────────────────
+    // (registered before /secrets/:path to win regex priority)
+    svr.Get(R"(/secrets/(.+)/yaml-extract)", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray);
+        if (!claims) return;
+        std::string path = "/" + req.matches[1].str();
+        if (!scope_allows(*claims, path)) {
+            get_logger()->warn("[cmd=yaml-extract] DENIED user={} path={} addr={}",
+                               claims->username, path, req.remote_addr);
+            res.status = 403;
+            res.set_content(jerr("access denied"), "application/json");
+            return;
+        }
+        std::string ypath = req.has_param("ypath") ? req.get_param_value("ypath") : "";
+        if (ypath.empty()) {
+            res.status = 400;
+            res.set_content(jerr("ypath query parameter is required"), "application/json");
+            return;
+        }
+        get_logger()->info("[cmd=yaml-extract] user={} path={} ypath={} addr={}",
+                           claims->username, path, ypath, req.remote_addr);
+        set_request_user(claims->username);
+        try {
+            MetadataRecord meta = read_metadata(env, path);
+            // Validate mimetype
+            static const std::vector<std::string> yaml_types = {
+                "application/yml", "application/yaml", "application/x-yaml", "text/yaml"
+            };
+            if (meta.mimetype.empty()) {
+                res.status = 400;
+                res.set_content(jerr("no mimetype stored for this secret"), "application/json");
+                clear_request_user();
+                return;
+            }
+            bool is_yaml = false;
+            for (const auto& t : yaml_types)
+                if (meta.mimetype == t) { is_yaml = true; break; }
+            if (!is_yaml) {
+                res.status = 400;
+                res.set_content(jerr("mimetype '" + meta.mimetype + "' is not a YAML type"),
+                                "application/json");
+                clear_request_user();
+                return;
+            }
+            auto plaintext = read_secret(env, path, &data_cache);
+            std::string yaml_str(plaintext.begin(), plaintext.end());
+
+            struct fy_document* doc = fy_document_build_from_string(
+                nullptr, yaml_str.c_str(), yaml_str.size());
+            if (!doc) {
+                res.status = 400;
+                res.set_content(jerr("secret data is not valid YAML"), "application/json");
+                clear_request_user();
+                return;
+            }
+            struct fy_node* root = fy_document_root(doc);
+            struct fy_node* node = fy_node_by_path(
+                root, ypath.c_str(), ypath.size(), FYNWF_DONT_FOLLOW);
+            if (!node) {
+                fy_document_destroy(doc);
+                res.status = 404;
+                res.set_content(jerr("ypath '" + ypath + "' not found in document"),
+                                "application/json");
+                clear_request_user();
+                return;
+            }
+            bool scalar = fy_node_is_scalar(node);
+            char* result = fy_emit_node_to_string(
+                node, static_cast<fy_emitter_cfg_flags>(
+                    FYECF_MODE_ORIGINAL | FYECF_NO_ENDING_NEWLINE));
+            std::string value(result ? result : "");
+            free(result);
+            fy_document_destroy(doc);
+            res.set_content(value, scalar ? "text/plain" : "application/yaml");
+        } catch (const std::exception& e) {
+            res.status = 404;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+        clear_request_user();
     });
 
     // ── POST /secrets/:path ──────────────────────────────────────────────────

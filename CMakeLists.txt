@@ -14,6 +14,9 @@ find_library(BDB_LIB NAMES db-5.3 db-5 db5 db
 find_path(BDB_INC db.h
     PATHS /usr/include /usr/local/include REQUIRED)
 
+find_library(FYAML_LIB fyaml REQUIRED HINTS /usr/local/lib)
+find_path(FYAML_INC libfyaml.h REQUIRED HINTS /usr/local/include)
+
 # libcrystals (installed) + its transitive dynamic deps
 find_library(CRYSTALS_LIB crystals PATHS /usr/local/lib REQUIRED)
 find_library(XKCP_LIB     XKCP     PATHS /usr/local/lib REQUIRED)
@@ -183,10 +186,12 @@ target_include_directories(sarek_http PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CRYSTALS_INC}
 )
+target_include_directories(sarek_http PRIVATE ${FYAML_INC})
 target_link_libraries(sarek_http PUBLIC
     sarek_vault
     sarek_log
     OpenSSL::SSL
+    ${FYAML_LIB}
 )
 target_compile_options(sarek_http PRIVATE -Wall -Wextra)
 

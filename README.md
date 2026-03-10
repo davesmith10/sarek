@@ -13,7 +13,8 @@
 5. [Logging](#logging)
 6. [Authentication](#authentication)
 7. [API Reference](#api-reference)
-8. [curl Examples](#curl-examples)
+8. [YAML Secret Extraction](#yaml-secret-extraction)
+9. [curl Examples](#curl-examples)
 
 ---
 
@@ -479,6 +480,58 @@ Unauthenticated liveness check.
 
 ---
 
+## YAML Secret Extraction
+
+The server can extract a single value from a stored YAML secret without requiring the client to download and parse the full document. This is useful when a secret stores a structured credentials file and you need only one field — for example, pulling a password out of a multi-key YAML record.
+
+### Endpoint
+
+```
+GET /secrets/:path/yaml-extract?ypath=<expression>
+```
+
+Auth: Bearer token required; path scope rules apply as for `GET /secrets/:path`.
+
+The `ypath` query parameter is a [YPATH expression](https://github.com/pantoniou/libfyaml) compatible with the [libfyaml](https://github.com/pantoniou/libfyaml) library. YPATH is a JSONPath-like syntax for YAML documents; simple key paths take the form `/key/subkey`.
+
+### Behaviour
+
+| Condition | Response |
+|-----------|----------|
+| Secret not found or path out of scope | `404` / `403` |
+| No mimetype stored for secret | `400 {"error": "no mimetype stored for this secret"}` |
+| Mimetype is not a YAML type | `400 {"error": "mimetype '<type>' is not a YAML type"}` |
+| Secret data is not valid YAML | `400 {"error": "secret data is not valid YAML"}` |
+| YPATH expression not found in document | `404 {"error": "ypath '<expr>' not found in document"}` |
+| Scalar node matched | `200 text/plain` — the scalar value, no trailing newline |
+| Non-scalar node matched (mapping or sequence) | `200 application/yaml` — the sub-document serialised to YAML |
+
+Accepted YAML MIME types: `application/yaml`, `application/x-yaml`, `application/yml`, `text/yaml`.
+
+### curl Example
+
+Given a secret at `/alice/secrets/shopify` with content:
+
+```yaml
+data:
+  what: Shopify store admin login
+  who: dave@example.com
+  password: h4rdp4ss!
+```
+
+Extract the password field:
+
+```bash
+curl $CACERT \
+  -H "Authorization: Bearer $TOKEN" \
+  "https://sarek.local:8443/secrets/alice/secrets/shopify/yaml-extract?ypath=%2Fdata%2Fpassword"
+# output: h4rdp4ss!
+```
+
+`/data/password` must be percent-encoded as `%2Fdata%2Fpassword` in the query string. The `amanda yaml-extract` command handles this automatically.
+
+---
+
 ## curl Examples
 
 Set a few shell variables first:
@@ -561,6 +614,15 @@ curl $CACERT -X POST "$HOST/links" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"target":"/team-a/db-password","link":"/shared/db-password"}'
+```
+
+### Extract a value from a YAML secret
+
+```bash
+# ypath must be percent-encoded: /data/password → %2Fdata%2Fpassword
+curl $CACERT "$HOST/secrets/alice/secrets/shopify/yaml-extract?ypath=%2Fdata%2Fpassword" \
+  -H "Authorization: Bearer $TOKEN"
+# output: h4rdp4ss!
 ```
 
 ### Create a user (admin)

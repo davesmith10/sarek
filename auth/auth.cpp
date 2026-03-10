@@ -8,6 +8,9 @@
 
 #include <msgpack.hpp>
 
+#include <openssl/rand.h>
+
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <sstream>
@@ -53,6 +56,26 @@ static std::vector<std::string> split_assertions(const std::string& s) {
     while (std::getline(ss, line))
         if (!line.empty()) out.push_back(line);
     return out;
+}
+
+// Generate a random UUID v4 into a 16-byte buffer.
+static void gen_uuid_v4(uint8_t out[16]) {
+    if (RAND_bytes(out, 16) != 1)
+        throw std::runtime_error("gen_uuid_v4: RAND_bytes failed");
+    out[6] = (out[6] & 0x0f) | 0x40;  // version 4
+    out[8] = (out[8] & 0x3f) | 0x80;  // variant 10xx
+}
+
+// Format 16 raw UUID bytes as "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".
+static std::string format_uuid(const uint8_t uuid[16]) {
+    char buf[37];
+    std::snprintf(buf, sizeof(buf),
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        uuid[0],  uuid[1],  uuid[2],  uuid[3],
+        uuid[4],  uuid[5],  uuid[6],  uuid[7],
+        uuid[8],  uuid[9],  uuid[10], uuid[11],
+        uuid[12], uuid[13], uuid[14], uuid[15]);
+    return buf;
 }
 
 // Parse the outer msgpack tray-DB record and return the inner blob + enc byte.
@@ -117,6 +140,7 @@ std::vector<uint8_t> issue_token(const UserRecord& user,
     tok.expires_at = tok.issued_at + ttl_secs;
     tok.algorithm  = kTokenAlgECDSAP256;
     parse_uuid(system_token_tray.id, tok.tray_uuid);
+    gen_uuid_v4(tok.token_uuid);
 
     auto canonical = token_canonical_bytes(tok);
     ec_sig::sign("ECDSA P-256", sig_slot.sk, canonical, tok.signature);
@@ -166,7 +190,7 @@ TokenClaims validate_token(const std::vector<uint8_t>& wire,
     if (username.empty())
         throw std::runtime_error("validate_token: no 'usr:' assertion found in token data");
 
-    return {username, assertions};
+    return {username, assertions, format_uuid(tok.token_uuid)};
 }
 
 // ---------------------------------------------------------------------------
