@@ -146,34 +146,46 @@ user:
 }
 
 static void test_load_config_new_optional_fields() {
-    const char* yaml = R"yaml(---
-defaults:
-  cache-ttl: 86400
-  max-data-node-sz: 1mb
-db:
-  path: /var/lib/sarek
-http:
-  port: 8080
-user:
-  adminuser: admin
-  password-file: /etc/sarek/admin-pass.txt
-tls:
-  cert: /etc/sarek/cert.pem
-  key:  /etc/sarek/key.pem
-tray:
-  system: /etc/sarek/system.tray.yaml
-  password-file: /etc/sarek/tray-pass.txt
-)yaml";
+    // Create real temp files so path-readability checks pass.
+    std::string cert_path   = write_tmp("cert");
+    std::string key_path    = write_tmp("key");
+    std::string pwfile_path = write_tmp("pw");
+    std::string tray_path   = write_tmp("tray");
+    std::string traypw_path = write_tmp("traypw");
+
+    std::string yaml =
+        "---\n"
+        "defaults:\n"
+        "  cache-ttl: 86400\n"
+        "  max-data-node-sz: 1mb\n"
+        "db:\n"
+        "  path: /var/lib/sarek\n"
+        "http:\n"
+        "  port: 8080\n"
+        "user:\n"
+        "  adminuser: admin\n"
+        "  password-file: " + pwfile_path + "\n"
+        "tls:\n"
+        "  cert: " + cert_path + "\n"
+        "  key:  " + key_path + "\n"
+        "tray:\n"
+        "  system: " + tray_path + "\n"
+        "  password-file: " + traypw_path + "\n";
 
     std::string p = write_tmp(yaml);
     sarek::SarekConfig cfg = sarek::load_config(p);
     std::remove(p.c_str());
+    std::remove(cert_path.c_str());
+    std::remove(key_path.c_str());
+    std::remove(pwfile_path.c_str());
+    std::remove(tray_path.c_str());
+    std::remove(traypw_path.c_str());
 
-    assert(cfg.tls_cert                  == "/etc/sarek/cert.pem");
-    assert(cfg.tls_key                   == "/etc/sarek/key.pem");
-    assert(cfg.user_password_file        == "/etc/sarek/admin-pass.txt");
-    assert(cfg.system_tray_path          == "/etc/sarek/system.tray.yaml");
-    assert(cfg.system_tray_password_file == "/etc/sarek/tray-pass.txt");
+    assert(cfg.tls_cert                  == cert_path);
+    assert(cfg.tls_key                   == key_path);
+    assert(cfg.user_password_file        == pwfile_path);
+    assert(cfg.system_tray_path          == tray_path);
+    assert(cfg.system_tray_password_file == traypw_path);
 
     std::puts("load_config (new optional fields): OK");
 }
@@ -205,6 +217,83 @@ user:
     std::puts("load_config (new fields absent → empty): OK");
 }
 
+static void test_load_config_path_validation_throws() {
+    const std::string bad = "/tmp/sarek_nonexistent_path_xyz987.pem";
+
+    // Each yaml has exactly one path field set to a nonexistent file.
+    // user.password-file is in the same user: block as adminuser to avoid duplicate keys.
+    struct Case { std::string label; std::string yaml; };
+    Case cases[] = {
+        {"tray.system",
+         "---\ndefaults:\n  cache-ttl: 3600\n  max-data-node-sz: 1mb\n"
+         "db:\n  path: /var/lib/sarek\nhttp:\n  port: 8443\n"
+         "user:\n  adminuser: admin\n"
+         "tray:\n  system: " + bad + "\n"},
+
+        {"tls.cert",
+         "---\ndefaults:\n  cache-ttl: 3600\n  max-data-node-sz: 1mb\n"
+         "db:\n  path: /var/lib/sarek\nhttp:\n  port: 8443\n"
+         "user:\n  adminuser: admin\n"
+         "tls:\n  cert: " + bad + "\n"},
+
+        {"user.password-file",
+         "---\ndefaults:\n  cache-ttl: 3600\n  max-data-node-sz: 1mb\n"
+         "db:\n  path: /var/lib/sarek\nhttp:\n  port: 8443\n"
+         "user:\n  adminuser: admin\n  password-file: " + bad + "\n"},
+
+        {"tls.key",
+         "---\ndefaults:\n  cache-ttl: 3600\n  max-data-node-sz: 1mb\n"
+         "db:\n  path: /var/lib/sarek\nhttp:\n  port: 8443\n"
+         "user:\n  adminuser: admin\n"
+         "tls:\n  key: " + bad + "\n"},
+
+        {"tray.password-file",
+         "---\ndefaults:\n  cache-ttl: 3600\n  max-data-node-sz: 1mb\n"
+         "db:\n  path: /var/lib/sarek\nhttp:\n  port: 8443\n"
+         "user:\n  adminuser: admin\n"
+         "tray:\n  password-file: " + bad + "\n"},
+    };
+
+    for (auto& c : cases) {
+        std::string p = write_tmp(c.yaml);
+        bool threw = false;
+        try {
+            sarek::load_config(p);
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        std::remove(p.c_str());
+        assert(threw && ("nonexistent path should throw for: " + c.label).c_str());
+    }
+    std::puts("load_config (path validation throws on bad paths): OK");
+}
+
+static void test_load_config_all_paths_empty_no_throw() {
+    // All optional path fields absent → no throw.
+    const char* yaml = R"yaml(---
+defaults:
+  cache-ttl: 3600
+  max-data-node-sz: 1mb
+db:
+  path: /var/lib/sarek
+http:
+  port: 8443
+user:
+  adminuser: admin
+)yaml";
+
+    std::string p = write_tmp(yaml);
+    bool threw = false;
+    try {
+        sarek::load_config(p);
+    } catch (...) {
+        threw = true;
+    }
+    std::remove(p.c_str());
+    assert(!threw && "empty optional path fields should not throw");
+    std::puts("load_config (empty path fields no throw): OK");
+}
+
 static void test_load_config_missing_file() {
     bool threw = false;
     try {
@@ -228,6 +317,8 @@ int main() {
     test_load_config_missing_field();
     test_load_config_bad_suffix();
     test_load_config_missing_file();
+    test_load_config_path_validation_throws();
+    test_load_config_all_paths_empty_no_throw();
 
     std::puts("\nAll config tests passed.");
     return 0;

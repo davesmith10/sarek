@@ -4,10 +4,22 @@
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 
 namespace sarek {
+
+// ---------------------------------------------------------------------------
+// check_file_readable
+// ---------------------------------------------------------------------------
+static void check_file_readable(const std::string& label, const std::string& path) {
+    if (path.empty()) return;
+    std::ifstream f(path);
+    if (!f.good()) {
+        throw std::runtime_error("config: " + label + " path not readable: " + path);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // parse_size_str
@@ -103,6 +115,12 @@ SarekConfig load_config(const std::string& path) {
         cfg.system_tray_path = root["tray"]["system"].as<std::string>();
     if (root["tray"] && root["tray"]["password-file"])
         cfg.system_tray_password_file = root["tray"]["password-file"].as<std::string>();
+
+    check_file_readable("tls.cert",           cfg.tls_cert);
+    check_file_readable("tls.key",            cfg.tls_key);
+    check_file_readable("user.password-file", cfg.user_password_file);
+    check_file_readable("tray.system",        cfg.system_tray_path);
+    check_file_readable("tray.password-file", cfg.system_tray_password_file);
 
     return cfg;
 }
