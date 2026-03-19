@@ -68,7 +68,7 @@ add_library(sarek_config STATIC
 target_include_directories(sarek_config PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_link_libraries(sarek_config PUBLIC yaml-cpp)
+target_link_libraries(sarek_config PUBLIC yaml-cpp sarek_log)
 target_compile_options(sarek_config PRIVATE -Wall -Wextra)
 
 add_executable(sarek_config_test

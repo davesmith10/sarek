@@ -17,6 +17,7 @@
 9. [YAML Secret Extraction](#yaml-secret-extraction)
 10. [Secret Wrapping](#secret-wrapping)
 11. [curl Examples](#curl-examples)
+12. Server Multi-threading
 
 ---
 
@@ -653,7 +654,9 @@ curl $CACERT \
 
 ## Secret Wrapping
 
-Secret wrapping provides one-time, unauthenticated secret delivery — similar to Hashicorp Vault's response wrapping. An authenticated user encrypts a value and receives an opaque token. The token can be given to a recipient (via email, chat, etc.), who redeems it via an unauthenticated HTTP GET. Both DB records are deleted atomically on redemption, making the token truly single-use.
+Secret wrapping provides one-time, unauthenticated secret delivery — similar to Hashicorp Vault's response wrapping. An authenticated 
+user encrypts a value and receives an opaque token. The token can be given to a recipient (via email, chat, etc.), who redeems it via an 
+unauthenticated HTTP GET. Both DB records are deleted atomically on redemption, making the token truly single-use.
 
 ### How it works
 
@@ -668,6 +671,50 @@ Secret wrapping provides one-time, unauthenticated secret delivery — similar t
 **Encryption**: uses the `wrap` tray alias (must exist; server returns `400` if missing). The tray must have at least two KEM slots (level2+).
 
 **Cleanup**: expired wrapping tokens are purged by the same hourly background thread that purges expired bearer tokens.
+
+---
+
+## Server Multi-threading
+
+Q: Is sarek multithreaded?
+
+A: Yes, sarek is genuinely multi-threaded, and in normal operation requests do not block each other. Here's the full
+  picture:
+
+  HTTP layer — thread pool
+
+  cpp-httplib spins up a thread pool by default sized at max(8, hardware_concurrency - 1) threads, with a burst ceiling
+  of 4×. On your machine that's probably 15–16 base threads. Each incoming request gets its own thread from the pool, so
+   two users hitting the server simultaneously run concurrently.
+
+  BDB layer — ACID transactions, not a big lock
+
+  The BDB environment is opened with DB_INIT_LOCK | DB_INIT_LOG | DB_INIT_TXN. That means BDB's own lock manager is
+  active. Concurrent transactions on different records proceed in parallel — BDB handles page-level locking internally.
+  Two users creating secrets at the same path would conflict (BDB serialises that), but creating secrets at different
+  paths runs concurrently. A read (GET /secrets/...) and a write (POST /secrets/...) to different paths also run
+  concurrently.
+
+  LRU cache — fine-grained mutex
+
+  LruCache uses a single std::mutex per cache instance (there are two: one for trays, one for data objects). A cache hit
+   on one user's request does briefly lock the other, but only for the duration of a map lookup + LRU pointer shuffle —
+  microseconds. Not a practical bottleneck.
+
+  Background thread
+
+  There's one additional std::thread for the hourly token-expiry cleanup. It's independent of request handling.
+
+  The one real bottleneck
+
+  The LRU caches use a single mutex per cache. A cache miss that triggers a decrypt-then-store is done while holding the
+   lock, meaning a slow decryption on a large secret (OBIWAN + AES-GCM) would make other threads wait on that cache. For
+   most secrets this is negligible, but it's worth knowing. A finer-grained approach (lock-per-key, or
+  compute-outside-lock) would be the fix if it ever became an issue.
+
+  Short answer: two users creating or reading secrets simultaneously run on separate threads, use separate BDB
+  transactions with BDB's own locking, and don't block each other unless they're touching the exact same record.
+
 
 ---
 

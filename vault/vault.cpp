@@ -512,9 +512,6 @@ void create_secret(SarekEnv&                  env,
                    uint64_t                    creator_id) {
     validate_path(path);
 
-    if (env.path().get(path))
-        throw std::runtime_error("create_secret: path '" + path + "' already exists");
-
     uint64_t object_id = generate_object_id(env);
 
     auto encrypted = obiwan_encrypt(plaintext, tray);
@@ -529,13 +526,14 @@ void create_secret(SarekEnv&                  env,
 
     auto meta_bytes = pack_metadata(meta);
     auto id_enc     = encode_uint64(object_id);
+    std::vector<uint8_t> id_vec(id_enc.begin(), id_enc.end());
 
     auto txn = env.begin_txn();
     env.data().put(object_id, encrypted, txn.get());
     env.metadata().put(object_id, meta_bytes, txn.get());
-    {
-        std::vector<uint8_t> id_vec(id_enc.begin(), id_enc.end());
-        env.path().put(path, id_vec, txn.get());
+    if (!env.path().put_if_absent(path, id_vec, txn.get())) {
+        txn->abort();
+        throw std::runtime_error("create_secret: path '" + path + "' already exists");
     }
     txn->commit();
 
@@ -643,9 +641,6 @@ void create_link(SarekEnv&          env,
     validate_path(target_path);
     validate_path(link_path);
 
-    if (env.path().get(link_path))
-        throw std::runtime_error("create_link: link_path '" + link_path + "' already exists");
-
     uint64_t object_id = generate_object_id(env);
 
     MetadataRecord meta;
@@ -657,12 +652,13 @@ void create_link(SarekEnv&          env,
 
     auto meta_bytes = pack_metadata(meta);
     auto id_enc     = encode_uint64(object_id);
+    std::vector<uint8_t> id_vec(id_enc.begin(), id_enc.end());
 
     auto txn = env.begin_txn();
     env.metadata().put(object_id, meta_bytes, txn.get());
-    {
-        std::vector<uint8_t> id_vec(id_enc.begin(), id_enc.end());
-        env.path().put(link_path, id_vec, txn.get());
+    if (!env.path().put_if_absent(link_path, id_vec, txn.get())) {
+        txn->abort();
+        throw std::runtime_error("create_link: link_path '" + link_path + "' already exists");
     }
     txn->commit();
 

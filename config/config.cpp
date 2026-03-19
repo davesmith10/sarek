@@ -1,4 +1,5 @@
 #include "config.hpp"
+#include "log/log.hpp"
 
 #include <yaml-cpp/yaml.h>
 
@@ -17,7 +18,9 @@ static void check_file_readable(const std::string& label, const std::string& pat
     if (path.empty()) return;
     std::ifstream f(path);
     if (!f.good()) {
-        throw std::runtime_error("config: " + label + " path not readable: " + path);
+        auto msg = "config: " + label + " path not readable: " + path;
+        sarek::get_logger()->error(msg);
+        throw std::runtime_error(msg);
     }
 }
 
@@ -68,14 +71,17 @@ SarekConfig load_config(const std::string& path) {
     try {
         root = YAML::LoadFile(path);
     } catch (const YAML::Exception& e) {
-        throw std::runtime_error("load_config: cannot load '" + path + "': " + e.what());
+        auto msg = "load_config: cannot load '" + path + "': " + e.what();
+        sarek::get_logger()->error(msg);
+        throw std::runtime_error(msg);
     }
 
     auto require = [&](const char* section, const char* key) -> YAML::Node {
         if (!root[section] || !root[section][key]) {
-            throw std::runtime_error(
-                std::string("load_config: missing required field '") +
-                section + "." + key + "' in " + path);
+            auto msg = std::string("load_config: missing required field '") +
+                       section + "." + key + "' in " + path;
+            sarek::get_logger()->error(msg);
+            throw std::runtime_error(msg);
         }
         return root[section][key];
     };

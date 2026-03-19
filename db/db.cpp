@@ -106,6 +106,19 @@ void SarekDb::put(const std::string& key, const std::vector<uint8_t>& val,
                   SarekTxn* txn) {
     put(key.data(), key.size(), val.data(), val.size(), txn);
 }
+
+bool SarekDb::put_if_absent(const std::string& key,
+                             const std::vector<uint8_t>& val,
+                             SarekTxn* txn) {
+    DBT k = make_dbt_ro(key.data(), key.size());
+    DBT v = make_dbt_ro(val.data(), val.size());
+    int ret = db_->put(db_, txn ? txn->handle() : nullptr, &k, &v,
+                       DB_NOOVERWRITE);
+    if (ret == DB_KEYEXIST) return false;
+    bdb_check(ret, "SarekDb::put_if_absent");
+    return true;
+}
+
 void SarekDb::del(const std::string& key, SarekTxn* txn) {
     del(key.data(), key.size(), txn);
 }

@@ -59,6 +59,11 @@ public:
     void put(const std::string& key, const std::vector<uint8_t>& val,
              SarekTxn* txn = nullptr);
 
+    // Insert only if key is absent. Returns true if inserted, false if the key
+    // already existed. Uses DB_NOOVERWRITE so the check is atomic within txn.
+    bool put_if_absent(const std::string& key, const std::vector<uint8_t>& val,
+                       SarekTxn* txn = nullptr);
+
     void del(const std::string& key, SarekTxn* txn = nullptr);
 
     // ---- uint64-key convenience (big-endian encoded) ----------------------
