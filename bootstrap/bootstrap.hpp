@@ -4,6 +4,8 @@
 #include "db/db.hpp"
 #include "bootstrap/user_record.hpp"
 
+#include <crystals/tray.hpp>
+
 #include <memory>
 #include <string>
 
@@ -12,15 +14,28 @@ namespace sarek {
 // Returns true if the BDB environment at cfg.db_path has not yet been bootstrapped.
 bool needs_bootstrap(const SarekConfig& cfg);
 
-// Run bootstrap with a pre-supplied password.
-//   admin_password — used to PWENC-encrypt the system tray AND as the admin login password.
-//   scrypt_n_log2  — scrypt cost factor: N = 2^n_log2. Default 20; use 16 for tests.
-// Returns a fully-initialized SarekEnv ready for use. Throws on failure.
+// Import a system tray from a YAML file. Handles both plain (type: tray) and
+// password-protected (type: secure-tray) files. For plain trays, passwd/passwd_len
+// are ignored. Throws std::runtime_error on failure.
+Tray import_system_tray(const std::string& path,
+                         const char* passwd, size_t passwd_len);
+
+// Deserialize the system tray from the kernel keyring (via env.get_system_tray_bytes()).
+// Throws if the keyring blob has not been set on env.
+Tray load_system_tray(const SarekEnv& env);
+
+// Run bootstrap with a pre-supplied admin password and an already-imported system tray.
+//   admin_password — used as the admin login password.
+//   system_tray    — the Level3 system tray to store in DB and keyring.
+//   scrypt_n_log2  — scrypt cost factor: N = 2^n_log2. Default 20; use 14 for tests.
+// Returns a fully-initialized SarekEnv (with system tray in keyring). Throws on failure.
 std::unique_ptr<SarekEnv> run_bootstrap(const SarekConfig& cfg,
                                          const std::string& admin_password,
+                                         const Tray& system_tray,
                                          uint8_t scrypt_n_log2 = 20);
 
-// Interactive variant: prompts for password (no-echo) and calls run_bootstrap.
+// Interactive variant: prompts for system tray path/password and admin password
+// (falling back to config file values where set), then calls run_bootstrap.
 std::unique_ptr<SarekEnv> run_bootstrap_interactive(const SarekConfig& cfg);
 
 // ── Password hashing (also used by Module 5 — auth) ──────────────────────────

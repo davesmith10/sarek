@@ -2,6 +2,8 @@
 #include "bootstrap/bootstrap.hpp"
 #include "auth/auth.hpp"
 
+#include <crystals/tray.hpp>
+
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +24,10 @@ static sarek::SarekConfig make_cfg(const std::string& path) {
     cfg.cache_ttl_secs   = 3600;
     cfg.max_data_node_sz = 1048576;
     return cfg;
+}
+
+static Tray make_test_system_tray() {
+    return make_tray(TrayType::Level3, "system");
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +110,7 @@ static void test_obiwan_roundtrip() {
 static void test_create_and_read_secret() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     // Use system-token tray (Level2, unencrypted)
     Tray tray = sarek::load_tray_by_alias(*env, "system-token");
@@ -130,7 +136,7 @@ static void test_create_and_read_secret() {
 static void test_read_metadata() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     Tray tray = sarek::load_tray_by_alias(*env, "system-token");
     std::vector<uint8_t> data = {0xAB, 0xCD};
@@ -153,7 +159,7 @@ static void test_read_metadata() {
 static void test_list_secrets() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     Tray tray = sarek::load_tray_by_alias(*env, "system-token");
     std::vector<uint8_t> d = {1};
@@ -180,7 +186,7 @@ static void test_list_secrets() {
 static void test_create_link() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     Tray tray = sarek::load_tray_by_alias(*env, "system-token");
     std::vector<uint8_t> data = {'l', 'i', 'n', 'k'};
@@ -211,7 +217,7 @@ static void test_create_link() {
 static void test_create_user() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     sarek::create_user(*env, "alice", "alicepass", sarek::kUserFlagAdmin,
                        {"usr:alice", "/*"}, 42, 14);
@@ -236,7 +242,7 @@ static void test_create_user() {
 static void test_lock_user() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     sarek::create_user(*env, "bob", "bobpass", 0, {"usr:bob"}, 10, 14);
     sarek::lock_user(*env, "bob");
@@ -258,7 +264,7 @@ static void test_lock_user() {
 static void test_store_and_list_trays() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     Tray t1 = make_tray(TrayType::Level2, "team-a-tray");
     sarek::store_tray(*env, t1, 1);
@@ -312,7 +318,7 @@ static void test_store_and_list_trays() {
 static void test_read_secret_with_cache() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     Tray tray = sarek::load_tray_by_alias(*env, "system-token");
     std::vector<uint8_t> data = {10, 20, 30};

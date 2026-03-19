@@ -15,7 +15,8 @@
 7. [Token Revocation](#token-revocation)
 8. [API Reference](#api-reference)
 9. [YAML Secret Extraction](#yaml-secret-extraction)
-10. [curl Examples](#curl-examples)
+10. [Secret Wrapping](#secret-wrapping)
+11. [curl Examples](#curl-examples)
 
 ---
 
@@ -513,6 +514,37 @@ Unauthenticated liveness check.
 
 ---
 
+### `POST /wrap`
+
+Wrap a secret for one-time delivery. The request body is the raw plaintext bytes to protect. Optional `?ttl=<seconds>` query parameter (default 3600; range 600–432000).
+
+The `wrap` tray alias must exist (create with `amanda keygen --alias wrap`).
+
+**Request headers:**
+```
+Authorization: Bearer <token>
+Content-Type: application/octet-stream
+```
+
+**Response `200`:**
+```json
+{ "token": "<base64url-22-chars>" }
+```
+
+**Response `400`:** Wrap tray not found, body empty, or TTL out of range.
+
+---
+
+### `GET /wrapped/:token`
+
+Redeem a wrapping token. No authentication required. The token is the base64url string returned by `POST /wrap`. On success, both the `wrapped` and `wrapper_lookup` DB records are deleted atomically — the token cannot be redeemed again.
+
+**Response `200`:** Raw plaintext bytes with `Content-Type: text/plain; charset=utf-8`.
+
+**Response `404`:** Token not found or already redeemed or expired.
+
+---
+
 ### `GET /admin/tokens` *(admin only)*
 
 List all issued tokens with their status.
@@ -619,6 +651,26 @@ curl $CACERT \
 
 ---
 
+## Secret Wrapping
+
+Secret wrapping provides one-time, unauthenticated secret delivery — similar to Hashicorp Vault's response wrapping. An authenticated user encrypts a value and receives an opaque token. The token can be given to a recipient (via email, chat, etc.), who redeems it via an unauthenticated HTTP GET. Both DB records are deleted atomically on redemption, making the token truly single-use.
+
+### How it works
+
+1. Admin or user creates a `wrap` tray: `amanda keygen --alias wrap --tray level3`
+2. Sender wraps a secret: `echo "s3cr3t" | amanda wrap --ttl 2h` — prints a base64url token.
+3. Sender gives the recipient the URL: `https://sarek.host:8443/wrapped/<token>`
+4. Recipient redeems once: `curl https://sarek.host:8443/wrapped/<token>` — returns plaintext.
+5. Any further attempt returns `404`.
+
+**TTL range**: 600 s (10 min) – 432 000 s (5 days). Default: 3 600 s (1 hour).
+
+**Encryption**: uses the `wrap` tray alias (must exist; server returns `400` if missing). The tray must have at least two KEM slots (level2+).
+
+**Cleanup**: expired wrapping tokens are purged by the same hourly background thread that purges expired bearer tokens.
+
+---
+
 ## curl Examples
 
 Set a few shell variables first:
@@ -719,6 +771,36 @@ curl $CACERT -X POST "$HOST/users" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"username":"bob","password":"b0bsecret","assertions":["slc:/team-a/*"]}'
+```
+
+### Wrap a secret (one-time delivery)
+
+```bash
+# Wrap with default 1-hour TTL
+WRAP_TOKEN=$(echo -n "s3cr3t-password" | curl -s $CACERT -X POST "$HOST/wrap" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @- | jq -r .token)
+
+echo "Share this URL: $HOST/wrapped/$WRAP_TOKEN"
+
+# Wrap with explicit 24-hour TTL
+WRAP_TOKEN=$(echo -n "s3cr3t-password" | curl -s $CACERT -X POST "$HOST/wrap?ttl=86400" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @-)
+```
+
+### Redeem a wrapping token (no auth required)
+
+```bash
+# Recipient redeems the token — single use
+curl $CACERT "$HOST/wrapped/$WRAP_TOKEN"
+# → s3cr3t-password
+
+# Second attempt returns 404
+curl $CACERT "$HOST/wrapped/$WRAP_TOKEN"
+# → {"error":"unwrap: token not found"}
 ```
 
 ### Create a tray

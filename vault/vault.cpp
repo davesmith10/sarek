@@ -10,6 +10,8 @@
 
 #include <msgpack.hpp>
 
+#include <crystals/base64.hpp>
+
 #include <openssl/rand.h>
 
 #include <algorithm>
@@ -17,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -968,6 +971,208 @@ int purge_expired_tokens(SarekEnv& env) {
     if (!to_delete.empty())
         get_logger()->info("token.purge_expired: count={}", to_delete.size());
     return static_cast<int>(to_delete.size());
+}
+
+// ---------------------------------------------------------------------------
+// WrapService helpers
+// ---------------------------------------------------------------------------
+
+static std::string to_base64url(const uint8_t* data, size_t len) {
+    std::string b64 = base64_encode(data, len);
+    for (char& c : b64) {
+        if (c == '+') c = '-';
+        else if (c == '/') c = '_';
+    }
+    while (!b64.empty() && b64.back() == '=') b64.pop_back();
+    return b64;
+}
+
+static std::vector<uint8_t> from_base64url(const std::string& s) {
+    std::string b64 = s;
+    for (char& c : b64) {
+        if (c == '-') c = '+';
+        else if (c == '_') c = '/';
+    }
+    while (b64.size() % 4 != 0) b64 += '=';
+    return base64_decode(b64);
+}
+
+// Value format: map{"ui": user_id, "e": expiry_unix, "bl": encrypted_bytes}
+static std::vector<uint8_t> pack_wrapped_record(uint64_t user_id, int64_t expiry,
+                                                 const std::vector<uint8_t>& blob) {
+    msgpack::sbuffer buf;
+    msgpack::packer<msgpack::sbuffer> pk(buf);
+    pk.pack_map(3);
+    pk.pack(std::string("ui")); pk.pack_uint64(user_id);
+    pk.pack(std::string("e"));  pk.pack_int64(expiry);
+    pk.pack(std::string("bl")); pk.pack_bin(blob.size());
+                                pk.pack_bin_body(reinterpret_cast<const char*>(blob.data()), blob.size());
+    return {reinterpret_cast<const uint8_t*>(buf.data()),
+            reinterpret_cast<const uint8_t*>(buf.data()) + buf.size()};
+}
+
+struct WrappedDbValue {
+    uint64_t user_id = 0;
+    int64_t  expiry  = 0;
+    std::vector<uint8_t> blob;
+};
+
+static WrappedDbValue unpack_wrapped_record(const std::vector<uint8_t>& data) {
+    msgpack::object_handle oh = msgpack::unpack(
+        reinterpret_cast<const char*>(data.data()), data.size());
+    const msgpack::object& obj = oh.get();
+    if (obj.type != msgpack::type::MAP)
+        throw std::runtime_error("unpack_wrapped_record: expected map");
+    WrappedDbValue v;
+    const auto& map = obj.via.map;
+    for (uint32_t i = 0; i < map.size; ++i) {
+        const auto& kv = map.ptr[i];
+        if (kv.key.type != msgpack::type::STR) continue;
+        std::string key{kv.key.via.str.ptr, kv.key.via.str.size};
+        if (key == "ui") {
+            v.user_id = kv.val.as<uint64_t>();
+        } else if (key == "e") {
+            v.expiry = kv.val.as<int64_t>();
+        } else if (key == "bl") {
+            v.blob.assign(kv.val.via.bin.ptr,
+                          kv.val.via.bin.ptr + kv.val.via.bin.size);
+        }
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------------------
+// WrapService public functions
+// ---------------------------------------------------------------------------
+
+std::string create_wrapped(SarekEnv& env, uint64_t user_id,
+                           const std::vector<uint8_t>& plaintext,
+                           int64_t ttl_secs) {
+    static constexpr int64_t kMinTTL = 600;
+    static constexpr int64_t kMaxTTL = 5 * 86400;
+    if (ttl_secs < kMinTTL || ttl_secs > kMaxTTL)
+        throw std::invalid_argument("wrap: ttl must be between 600s (10m) and 432000s (5d)");
+
+    Tray wrap_tray;
+    try {
+        wrap_tray = load_tray_by_alias(env, "wrap");
+    } catch (const std::exception&) {
+        get_logger()->warn("wrap: the 'wrap' tray was not found");
+        throw std::runtime_error("wrap: the 'wrap' tray was not found");
+    }
+
+    std::array<uint8_t, 16> uuid_key;
+    if (RAND_bytes(uuid_key.data(), 16) != 1)
+        throw std::runtime_error("wrap: RAND_bytes failed (uuid_key)");
+
+    std::array<uint8_t, 16> token_key;
+    if (RAND_bytes(token_key.data(), 16) != 1)
+        throw std::runtime_error("wrap: RAND_bytes failed (token_key)");
+
+    int64_t now    = static_cast<int64_t>(std::time(nullptr));
+    int64_t expiry = now + ttl_secs;
+
+    auto encrypted = obiwan_encrypt(plaintext, wrap_tray);
+    auto packed    = pack_wrapped_record(user_id, expiry, encrypted);
+
+    auto txn = env.begin_txn();
+    env.wrapped().put(uuid_key.data(), 16, packed.data(), packed.size(), txn.get());
+    env.wrapper_lookup().put(token_key.data(), 16, uuid_key.data(), 16, txn.get());
+    txn->commit();
+
+    get_logger()->info("wrap.create: user_id={} expiry={}", user_id, expiry);
+    return to_base64url(token_key.data(), 16);
+}
+
+std::vector<uint8_t> unwrap(SarekEnv& env, const std::string& base64url_token) {
+    auto token_bytes = from_base64url(base64url_token);
+    if (token_bytes.size() != 16)
+        throw std::runtime_error("unwrap: invalid token length");
+
+    auto uuid_bytes_opt = env.wrapper_lookup().get(token_bytes.data(), 16);
+    if (!uuid_bytes_opt)
+        throw std::runtime_error("unwrap: token not found");
+    if (uuid_bytes_opt->size() != 16)
+        throw std::runtime_error("unwrap: corrupt wrapper_lookup record");
+
+    auto packed_opt = env.wrapped().get(uuid_bytes_opt->data(), 16);
+    if (!packed_opt)
+        throw std::runtime_error("unwrap: wrapped record not found");
+
+    auto wv = unpack_wrapped_record(*packed_opt);
+
+    int64_t now = static_cast<int64_t>(std::time(nullptr));
+    if (wv.expiry < now)
+        throw std::runtime_error("unwrap: token has expired");
+
+    Tray wrap_tray;
+    try {
+        wrap_tray = load_tray_by_alias(env, "wrap");
+    } catch (const std::exception&) {
+        get_logger()->warn("wrap: the 'wrap' tray was not found");
+        throw std::runtime_error("wrap: the 'wrap' tray was not found");
+    }
+
+    auto plaintext = obiwan_decrypt(wv.blob, wrap_tray);
+
+    auto txn = env.begin_txn();
+    env.wrapper_lookup().del(token_bytes.data(), 16, txn.get());
+    env.wrapped().del(uuid_bytes_opt->data(), 16, txn.get());
+    txn->commit();
+
+    get_logger()->info("wrap.unwrap: user_id={}", wv.user_id);
+    return plaintext;
+}
+
+int purge_expired_wrapped(SarekEnv& env) {
+    int64_t now = static_cast<int64_t>(std::time(nullptr));
+
+    std::vector<std::vector<uint8_t>> expired_uuid_keys;
+    env.wrapped().scan(nullptr,
+        [&](const void* k, size_t ksz, const void* v, size_t vsz) -> bool {
+            try {
+                std::vector<uint8_t> packed(
+                    reinterpret_cast<const uint8_t*>(v),
+                    reinterpret_cast<const uint8_t*>(v) + vsz);
+                auto wv = unpack_wrapped_record(packed);
+                if (wv.expiry < now) {
+                    expired_uuid_keys.push_back(
+                        std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(k),
+                                             reinterpret_cast<const uint8_t*>(k) + ksz));
+                }
+            } catch (...) {}
+            return true;
+        });
+
+    if (expired_uuid_keys.empty()) return 0;
+
+    std::set<std::vector<uint8_t>> expired_set(
+        expired_uuid_keys.begin(), expired_uuid_keys.end());
+
+    std::vector<std::vector<uint8_t>> token_keys_to_del;
+    env.wrapper_lookup().scan(nullptr,
+        [&](const void* k, size_t ksz, const void* v, size_t vsz) -> bool {
+            std::vector<uint8_t> uuid_val(
+                reinterpret_cast<const uint8_t*>(v),
+                reinterpret_cast<const uint8_t*>(v) + vsz);
+            if (expired_set.count(uuid_val)) {
+                token_keys_to_del.push_back(
+                    std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(k),
+                                         reinterpret_cast<const uint8_t*>(k) + ksz));
+            }
+            return true;
+        });
+
+    auto txn = env.begin_txn();
+    for (const auto& uk : expired_uuid_keys)
+        env.wrapped().del(uk.data(), uk.size(), txn.get());
+    for (const auto& tk : token_keys_to_del)
+        env.wrapper_lookup().del(tk.data(), tk.size(), txn.get());
+    txn->commit();
+
+    int n = static_cast<int>(expired_uuid_keys.size());
+    get_logger()->info("wrap.purge_expired: count={}", n);
+    return n;
 }
 
 } // namespace sarek

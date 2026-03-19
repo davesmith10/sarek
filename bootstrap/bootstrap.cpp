@@ -7,8 +7,10 @@
 #include <crystals/symmetric.hpp>
 #include <crystals/pw_format.hpp>
 #include <crystals/base64.hpp>
+#include <crystals/secure_tray.hpp>
 
 #include <msgpack.hpp>
+#include <yaml-cpp/yaml.h>
 
 extern "C" {
 #include "scrypt-kdf.h"
@@ -21,6 +23,8 @@ extern "C" {
 #include <array>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -87,59 +91,6 @@ static void run_scrypt(const std::string& passwd,
     if (scrypt_kdf(reinterpret_cast<const uint8_t*>(passwd.data()), passwd.size(),
                    salt, salt_len, N, r, p, out, out_len) != 0)
         throw std::runtime_error("scrypt KDF failed");
-}
-
-// PWENC-encrypt plaintext → raw wire bytes (no base64 armor).
-static std::vector<uint8_t> pwenc_encrypt(const std::vector<uint8_t>& plaintext,
-                                           const std::string& password,
-                                           int level = 768,
-                                           uint8_t n_log2 = 20) {
-    auto ksz = kyber_kem_sizes(level);
-
-    // 1. Ephemeral Kyber keypair
-    std::vector<uint8_t> pk(ksz.pk_bytes), sk(ksz.sk_bytes);
-    int rc = 0;
-    if      (level == 512)  rc = pqcrystals_kyber512_ref_keypair(pk.data(), sk.data());
-    else if (level == 768)  rc = pqcrystals_kyber768_ref_keypair(pk.data(), sk.data());
-    else                    rc = pqcrystals_kyber1024_ref_keypair(pk.data(), sk.data());
-    if (rc != 0) throw std::runtime_error("Kyber keypair generation failed");
-
-    // 2. Encapsulate → ct, ss
-    std::vector<uint8_t> ct(ksz.ct_bytes), ss(ksz.ss_bytes);
-    if      (level == 512)  rc = pqcrystals_kyber512_ref_enc(ct.data(), ss.data(), pk.data());
-    else if (level == 768)  rc = pqcrystals_kyber768_ref_enc(ct.data(), ss.data(), pk.data());
-    else                    rc = pqcrystals_kyber1024_ref_enc(ct.data(), ss.data(), pk.data());
-    if (rc != 0) throw std::runtime_error("Kyber encaps failed");
-
-    // 3. Random salt + scrypt → wrap_key
-    uint8_t salt[32];
-    if (RAND_bytes(salt, 32) != 1) throw std::runtime_error("RAND_bytes failed");
-    uint8_t wrap_key[32];
-    run_scrypt(password, salt, 32, n_log2, 8, 1, wrap_key, 32);
-
-    // 4. Wrap sk with AES-256-GCM(wrap_key, no AAD)
-    auto wrap_blob = aes256gcm_encrypt_aad(wrap_key, sk, nullptr, 0);
-    OPENSSL_cleanse(wrap_key, 32);
-    OPENSSL_cleanse(sk.data(), sk.size());
-
-    // 5. Encrypt plaintext with AES-256-GCM(ss[0..31], AAD = magic+ver+level)
-    auto aad = pw_bundle_aad(level);
-    auto data_blob = aes256gcm_encrypt_aad(ss.data(), plaintext, aad.data(), aad.size());
-    OPENSSL_cleanse(ss.data(), ss.size());
-
-    // 6. Assemble and pack PwBundle (raw wire bytes)
-    PwBundle bundle;
-    bundle.level = level;
-    std::memcpy(bundle.salt, salt, 32);
-    bundle.scrypt_n_log2        = n_log2;
-    bundle.scrypt_r             = 8;
-    bundle.scrypt_p             = 1;
-    bundle.pk                   = std::move(pk);
-    bundle.ct                   = std::move(ct);
-    bundle.wrap_nonce_tag_sk_enc = std::move(wrap_blob);
-    bundle.data_nonce_tag_ct    = std::move(data_blob);
-
-    return pack_pw_bundle(bundle);
 }
 
 // ---------------------------------------------------------------------------
@@ -236,18 +187,65 @@ bool verify_password(const std::string& plaintext, const std::string& stored) {
     return match;
 }
 
+// ---------------------------------------------------------------------------
+// import_system_tray / load_system_tray
+// ---------------------------------------------------------------------------
+
+Tray import_system_tray(const std::string& path,
+                         const char* passwd, size_t passwd_len) {
+    YAML::Node root;
+    try {
+        root = YAML::LoadFile(path);
+    } catch (const YAML::Exception& e) {
+        throw std::runtime_error(
+            "import_system_tray: cannot load '" + path + "': " + e.what());
+    }
+
+    std::string type;
+    if (root["type"]) type = root["type"].as<std::string>();
+
+    if (type == "secure-tray") {
+        SecureTray st = load_secure_tray_yaml(path);
+        return unprotect_tray(st, passwd, passwd_len);
+    } else {
+        return load_tray_yaml(path);
+    }
+}
+
+Tray load_system_tray(const SarekEnv& env) {
+    auto bytes = env.get_system_tray_bytes();
+    return tray_mp::unpack(bytes);
+}
+
+// ---------------------------------------------------------------------------
+// Internal helper: read the first non-empty line from a file
+// ---------------------------------------------------------------------------
+
+static std::string read_first_line(const std::string& path) {
+    std::ifstream f(path);
+    if (!f) throw std::runtime_error("cannot open file: " + path);
+    std::string line;
+    std::getline(f, line);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.empty()) throw std::runtime_error("file is empty: " + path);
+    return line;
+}
+
+// ---------------------------------------------------------------------------
+// run_bootstrap
+// ---------------------------------------------------------------------------
+
 std::unique_ptr<SarekEnv> run_bootstrap(const SarekConfig& cfg,
                                          const std::string& admin_password,
+                                         const Tray& system_tray,
                                          uint8_t scrypt_n_log2) {
     auto env = std::make_unique<SarekEnv>(cfg.db_path);
     auto txn = env->begin_txn();
 
-    // ── system tray (Level3, PWENC-encrypted) ────────────────────────────────
-    Tray system_tray = make_tray(TrayType::Level3, "system");
-    auto sys_plain   = tray_mp::pack(system_tray);
-    auto sys_pwenc   = pwenc_encrypt(sys_plain, admin_password, 768, scrypt_n_log2);
-    auto sys_id      = uuid_str_to_bytes(system_tray.id);
-    auto sys_record  = pack_tray_record(1, "system", 0x01, 0, sys_pwenc);
+    // ── system tray (imported, stored as plain msgpack enc=0) ────────────────
+    auto sys_plain  = tray_mp::pack(system_tray);
+    auto sys_id     = uuid_str_to_bytes(system_tray.id);
+    auto sys_record = pack_tray_record(0, "system", 0x01, 0, sys_plain);
 
     env->tray().put(sys_id.data(), sys_id.size(),
                     sys_record.data(), sys_record.size(), txn.get());
@@ -255,10 +253,10 @@ std::unique_ptr<SarekEnv> run_bootstrap(const SarekConfig& cfg,
         std::vector<uint8_t>(sys_id.begin(), sys_id.end()), txn.get());
 
     // ── system-token tray (Level2, plain msgpack) ─────────────────────────────
-    Tray token_tray    = make_tray(TrayType::Level2, "system-token");
-    auto tok_plain     = tray_mp::pack(token_tray);
-    auto tok_id        = uuid_str_to_bytes(token_tray.id);
-    auto tok_record    = pack_tray_record(0, "system-token", 0x01, 0, tok_plain);
+    Tray token_tray = make_tray(TrayType::Level2, "system-token");
+    auto tok_plain  = tray_mp::pack(token_tray);
+    auto tok_id     = uuid_str_to_bytes(token_tray.id);
+    auto tok_record = pack_tray_record(0, "system-token", 0x01, 0, tok_plain);
 
     env->tray().put(tok_id.data(), tok_id.size(),
                     tok_record.data(), tok_record.size(), txn.get());
@@ -276,32 +274,91 @@ std::unique_ptr<SarekEnv> run_bootstrap(const SarekConfig& cfg,
     env->user().put(cfg.admin_user, admin_bytes, txn.get());
 
     txn->commit();
+
+    // ── Store system tray msgpack bytes in kernel keyring ─────────────────────
+    auto blob = KeyringBlob::store(
+        "sarek:system-tray", sys_plain.data(), sys_plain.size());
+    env->set_system_tray_keyring(std::move(blob));
+
     return env;
 }
 
+// ---------------------------------------------------------------------------
+// run_bootstrap_interactive
+// ---------------------------------------------------------------------------
+
 std::unique_ptr<SarekEnv> run_bootstrap_interactive(const SarekConfig& cfg) {
-    char passwd[256] = {};
-    char verify[256] = {};
-
-    if (EVP_read_pw_string(passwd, sizeof(passwd), "Admin password: ", 0) != 0)
-        throw std::runtime_error("Password input failed");
-
-    if (EVP_read_pw_string(verify, sizeof(verify), "Confirm password: ", 0) != 0) {
-        OPENSSL_cleanse(passwd, sizeof(passwd));
-        throw std::runtime_error("Password input failed");
+    // ── Step 1: System tray path ──────────────────────────────────────────────
+    std::string tray_path = cfg.system_tray_path;
+    if (tray_path.empty()) {
+        std::cout << "Please input path to the system tray: " << std::flush;
+        std::getline(std::cin, tray_path);
+        if (tray_path.empty())
+            throw std::runtime_error("No system tray path provided");
     }
 
-    if (std::strcmp(passwd, verify) != 0) {
-        OPENSSL_cleanse(passwd, sizeof(passwd));
+    // ── Step 2: Peek at YAML type field ──────────────────────────────────────
+    YAML::Node root;
+    try {
+        root = YAML::LoadFile(tray_path);
+    } catch (const YAML::Exception& e) {
+        throw std::runtime_error(
+            "run_bootstrap_interactive: cannot load tray file '" +
+            tray_path + "': " + e.what());
+    }
+    std::string type;
+    if (root["type"]) type = root["type"].as<std::string>();
+
+    // ── Step 3: Tray password (only for secure-tray) ─────────────────────────
+    char tray_pw_buf[256] = {};
+    std::string tray_pw_str;  // holds password if read from file
+    const char* tray_pw  = nullptr;
+    size_t      tray_pwl = 0;
+
+    if (type == "secure-tray") {
+        if (!cfg.system_tray_password_file.empty()) {
+            tray_pw_str = read_first_line(cfg.system_tray_password_file);
+            tray_pw  = tray_pw_str.c_str();
+            tray_pwl = tray_pw_str.size();
+        } else {
+            if (EVP_read_pw_string(tray_pw_buf, sizeof(tray_pw_buf),
+                                   "Tray is protected. Please provide the password: ", 0) != 0)
+                throw std::runtime_error("Tray password input failed");
+            tray_pw  = tray_pw_buf;
+            tray_pwl = std::strlen(tray_pw_buf);
+        }
+    }
+
+    Tray system_tray = import_system_tray(tray_path, tray_pw, tray_pwl);
+    OPENSSL_cleanse(tray_pw_buf, sizeof(tray_pw_buf));
+
+    // ── Step 4: Admin password ────────────────────────────────────────────────
+    std::string admin_pw;
+    if (!cfg.user_password_file.empty()) {
+        admin_pw = read_first_line(cfg.user_password_file);
+    } else {
+        char passwd[256] = {};
+        char verify[256] = {};
+
+        if (EVP_read_pw_string(passwd, sizeof(passwd), "Admin password: ", 0) != 0)
+            throw std::runtime_error("Password input failed");
+
+        if (EVP_read_pw_string(verify, sizeof(verify), "Confirm password: ", 0) != 0) {
+            OPENSSL_cleanse(passwd, sizeof(passwd));
+            throw std::runtime_error("Password input failed");
+        }
+
+        if (std::strcmp(passwd, verify) != 0) {
+            OPENSSL_cleanse(passwd, sizeof(passwd));
+            OPENSSL_cleanse(verify, sizeof(verify));
+            throw std::runtime_error("Passwords do not match");
+        }
         OPENSSL_cleanse(verify, sizeof(verify));
-        throw std::runtime_error("Passwords do not match");
+        admin_pw = passwd;
+        OPENSSL_cleanse(passwd, sizeof(passwd));
     }
-    OPENSSL_cleanse(verify, sizeof(verify));
 
-    std::string pw(passwd);
-    OPENSSL_cleanse(passwd, sizeof(passwd));
-
-    return run_bootstrap(cfg, pw);
+    return run_bootstrap(cfg, admin_pw, system_tray);
 }
 
 } // namespace sarek

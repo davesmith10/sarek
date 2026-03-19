@@ -223,11 +223,13 @@ SarekEnv::SarekEnv(const std::string& path) {
         open_db(metadata_,         "metadata");
         open_db(path_db_,          "path");
         open_db(manage_token_db_,  "manage_token");
+        open_db(wrapped_db_,       "wrapped");
+        open_db(wrapper_lookup_db_, "wrapper_lookup");
     } catch (...) {
         // Close any that opened successfully before re-throwing.
         tray_.close(); tray_alias_.close(); user_db_.close();
         data_.close(); metadata_.close();   path_db_.close();
-        manage_token_db_.close();
+        manage_token_db_.close(); wrapped_db_.close(); wrapper_lookup_db_.close();
         env_->close(env_, 0);
         env_ = nullptr;
         throw;
@@ -243,6 +245,8 @@ SarekEnv::~SarekEnv() {
     metadata_.close();
     path_db_.close();
     manage_token_db_.close();
+    wrapped_db_.close();
+    wrapper_lookup_db_.close();
 
     if (env_) {
         env_->close(env_, 0);
@@ -271,6 +275,16 @@ std::unique_ptr<SarekTxn> SarekEnv::begin_txn() {
     DB_TXN* txn = nullptr;
     bdb_check(env_->txn_begin(env_, nullptr, &txn, 0), "txn_begin");
     return std::unique_ptr<SarekTxn>(new SarekTxn(txn));
+}
+
+void SarekEnv::set_system_tray_keyring(KeyringBlob&& blob) {
+    system_tray_blob_ = std::move(blob);
+}
+
+std::vector<uint8_t> SarekEnv::get_system_tray_bytes() const {
+    if (!system_tray_blob_)
+        throw std::runtime_error("system tray has not been loaded into keyring");
+    return system_tray_blob_->load();
 }
 
 } // namespace sarek

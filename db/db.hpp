@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <db.h>
+#include "keyring.hpp"
 
 namespace sarek {
 
@@ -102,12 +103,12 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// SarekEnv — BDB environment + all six named databases
+// SarekEnv — BDB environment + all eight named databases
 // ---------------------------------------------------------------------------
 class SarekEnv {
 public:
     // Opens (and creates if necessary) the BDB environment at `path` and opens
-    // all six named BTree databases within it.
+    // all eight named BTree databases within it.
     explicit SarekEnv(const std::string& path);
     ~SarekEnv();
     SarekEnv(const SarekEnv&) = delete;
@@ -116,13 +117,24 @@ public:
     std::unique_ptr<SarekTxn> begin_txn();
 
     // Named database accessors
-    SarekDb& tray()         { return tray_; }
-    SarekDb& tray_alias()   { return tray_alias_; }
-    SarekDb& user()         { return user_db_; }
-    SarekDb& data()         { return data_; }
-    SarekDb& metadata()     { return metadata_; }
-    SarekDb& path()         { return path_db_; }
-    SarekDb& manage_token() { return manage_token_db_; }
+    SarekDb& tray()            { return tray_; }
+    SarekDb& tray_alias()      { return tray_alias_; }
+    SarekDb& user()            { return user_db_; }
+    SarekDb& data()            { return data_; }
+    SarekDb& metadata()        { return metadata_; }
+    SarekDb& path()            { return path_db_; }
+    SarekDb& manage_token()    { return manage_token_db_; }
+    SarekDb& wrapped()         { return wrapped_db_; }
+    SarekDb& wrapper_lookup()  { return wrapper_lookup_db_; }
+
+    // ── System tray keyring ──────────────────────────────────────────────────
+    // Store the decrypted system tray as raw msgpack bytes in the kernel
+    // keyring. The KeyringBlob lifetime is tied to this SarekEnv instance.
+    void set_system_tray_keyring(KeyringBlob&& blob);
+
+    // Retrieve raw msgpack bytes from the keyring.
+    // Throws std::runtime_error if the keyring blob has not been set.
+    std::vector<uint8_t> get_system_tray_bytes() const;
 
 private:
     void open_db(SarekDb& db, const char* name);
@@ -136,6 +148,10 @@ private:
     SarekDb metadata_;
     SarekDb path_db_;
     SarekDb manage_token_db_;
+    SarekDb wrapped_db_;
+    SarekDb wrapper_lookup_db_;
+
+    std::optional<KeyringBlob> system_tray_blob_;
 };
 
 } // namespace sarek

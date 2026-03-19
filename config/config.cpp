@@ -88,6 +88,22 @@ SarekConfig load_config(const std::string& path) {
     while (cfg.log_dir.size() > 1 && cfg.log_dir.back() == '/')
         cfg.log_dir.pop_back();
 
+    // TLS (optional)
+    if (root["tls"] && root["tls"]["cert"])
+        cfg.tls_cert = root["tls"]["cert"].as<std::string>();
+    if (root["tls"] && root["tls"]["key"])
+        cfg.tls_key = root["tls"]["key"].as<std::string>();
+
+    // user.password-file (optional)
+    if (root["user"] && root["user"]["password-file"])
+        cfg.user_password_file = root["user"]["password-file"].as<std::string>();
+
+    // tray section (optional)
+    if (root["tray"] && root["tray"]["system"])
+        cfg.system_tray_path = root["tray"]["system"].as<std::string>();
+    if (root["tray"] && root["tray"]["password-file"])
+        cfg.system_tray_password_file = root["tray"]["password-file"].as<std::string>();
+
     return cfg;
 }
 

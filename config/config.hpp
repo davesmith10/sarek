@@ -14,6 +14,17 @@ struct SarekConfig {
     std::string admin_user;       // user.adminuser
     std::vector<std::string> trusted_proxies; // http.trusted-proxies (optional)
     std::string log_dir;          // log.dir (default: /var/log)
+
+    // TLS (optional — CLI flags override these)
+    std::string tls_cert;                    // tls.cert
+    std::string tls_key;                     // tls.key
+
+    // Password file paths (optional — TTY prompt used if absent)
+    std::string user_password_file;          // user.password-file  (admin password at bootstrap)
+
+    // System tray import (optional — TTY prompt used if absent)
+    std::string system_tray_path;            // tray.system
+    std::string system_tray_password_file;   // tray.password-file  (system tray decrypt password)
 };
 
 // Throws std::runtime_error  if file is missing or a required field is absent.

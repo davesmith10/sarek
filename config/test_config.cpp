@@ -145,6 +145,66 @@ user:
     std::puts("load_config (bad size suffix): OK");
 }
 
+static void test_load_config_new_optional_fields() {
+    const char* yaml = R"yaml(---
+defaults:
+  cache-ttl: 86400
+  max-data-node-sz: 1mb
+db:
+  path: /var/lib/sarek
+http:
+  port: 8080
+user:
+  adminuser: admin
+  password-file: /etc/sarek/admin-pass.txt
+tls:
+  cert: /etc/sarek/cert.pem
+  key:  /etc/sarek/key.pem
+tray:
+  system: /etc/sarek/system.tray.yaml
+  password-file: /etc/sarek/tray-pass.txt
+)yaml";
+
+    std::string p = write_tmp(yaml);
+    sarek::SarekConfig cfg = sarek::load_config(p);
+    std::remove(p.c_str());
+
+    assert(cfg.tls_cert                  == "/etc/sarek/cert.pem");
+    assert(cfg.tls_key                   == "/etc/sarek/key.pem");
+    assert(cfg.user_password_file        == "/etc/sarek/admin-pass.txt");
+    assert(cfg.system_tray_path          == "/etc/sarek/system.tray.yaml");
+    assert(cfg.system_tray_password_file == "/etc/sarek/tray-pass.txt");
+
+    std::puts("load_config (new optional fields): OK");
+}
+
+static void test_load_config_new_fields_absent() {
+    // When new optional fields are absent, they should be empty strings.
+    const char* yaml = R"yaml(---
+defaults:
+  cache-ttl: 86400
+  max-data-node-sz: 1mb
+db:
+  path: /var/lib/sarek
+http:
+  port: 8080
+user:
+  adminuser: admin
+)yaml";
+
+    std::string p = write_tmp(yaml);
+    sarek::SarekConfig cfg = sarek::load_config(p);
+    std::remove(p.c_str());
+
+    assert(cfg.tls_cert.empty());
+    assert(cfg.tls_key.empty());
+    assert(cfg.user_password_file.empty());
+    assert(cfg.system_tray_path.empty());
+    assert(cfg.system_tray_password_file.empty());
+
+    std::puts("load_config (new fields absent → empty): OK");
+}
+
 static void test_load_config_missing_file() {
     bool threw = false;
     try {
@@ -163,6 +223,8 @@ int main() {
     test_parse_size_str();
     test_load_config_happy_path();
     test_load_config_log_dir();
+    test_load_config_new_optional_fields();
+    test_load_config_new_fields_absent();
     test_load_config_missing_field();
     test_load_config_bad_suffix();
     test_load_config_missing_file();

@@ -13,5 +13,15 @@ http:
   #   - 10.0.0.1                  # proxy on a specific remote host
 user:
   adminuser: admin                # username created during bootstrap, change to suit
+  password-file: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/admin-pass.txt
 log:
   dir: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp  # default /var/log
+
+## new tls section, flags override this
+tls:
+  cert: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/cert.pem
+  key: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/key.pem
+
+tray:
+  system: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/system.tray.protected.yml
+  password-file: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/admin-pass.txt

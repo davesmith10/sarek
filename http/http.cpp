@@ -211,6 +211,31 @@ static uint64_t generate_user_id(SarekEnv& /*env*/) {
 }
 
 // ---------------------------------------------------------------------------
+// TTL parsing: "10m", "1h", "2d", "3600s" or plain integer seconds → seconds
+// Returns 0 on parse error.
+// ---------------------------------------------------------------------------
+
+static int64_t parse_ttl(const std::string& s) {
+    if (s.empty()) return 0;
+    char unit = s.back();
+    if (!std::isdigit(static_cast<unsigned char>(unit)) &&
+        !std::isalpha(static_cast<unsigned char>(unit))) return 0;
+    int64_t n = 0;
+    try {
+        n = std::stoll(std::string(s.begin(),
+                                   s.end() - (std::isalpha(static_cast<unsigned char>(unit)) ? 1 : 0)));
+    } catch (...) { return 0; }
+    if (std::isdigit(static_cast<unsigned char>(unit))) return n;
+    switch (std::tolower(static_cast<unsigned char>(unit))) {
+        case 's': return n;
+        case 'm': return n * 60;
+        case 'h': return n * 3600;
+        case 'd': return n * 86400;
+        default:  return 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -819,12 +844,10 @@ static void register_routes(
         }
         set_request_user(claims->username);
         try {
-            // Tray alias comes from query param "tray"; defaults to "system-token"
-            std::string tray_alias = req.has_param("tray")
-                ? req.get_param_value("tray")
-                : "system-token";
-
-            Tray tray    = load_tray_by_alias(env, tray_alias);
+            // Tray: explicit "tray" query param, or the system tray from keyring.
+            Tray tray = req.has_param("tray")
+                ? load_tray_by_alias(env, req.get_param_value("tray"))
+                : load_system_tray(env);
             std::string mimetype = req.get_header_value("Content-Type");
             if (mimetype.empty()) mimetype = "application/octet-stream";
 
@@ -1033,6 +1056,65 @@ static void register_routes(
         get_logger()->info("[cmd=health] addr={}", req.remote_addr);
         res.set_content(jok("healthy"), "application/json");
     });
+
+    // ── POST /wrap — create a wrapped secret (authenticated) ─────────────────
+    svr.Post("/wrap", [&](const httplib::Request& req, httplib::Response& res) {
+        auto log    = get_logger();
+        auto claims = try_auth(req, res, tok_tray, env);
+        if (!claims) return;
+
+        try {
+            std::string ttl_str = req.get_param_value("ttl");
+            if (ttl_str.empty()) ttl_str = "3600";
+
+            int64_t ttl_secs = parse_ttl(ttl_str);
+            if (ttl_secs < 600 || ttl_secs > 432000) {
+                res.status = 400;
+                res.set_content(jerr("ttl must be 600-432000 seconds"), "application/json");
+                return;
+            }
+
+            auto user_opt = load_user(env, claims->username);
+            if (!user_opt) {
+                res.status = 500;
+                res.set_content(jerr("user record not found"), "application/json");
+                return;
+            }
+
+            std::vector<uint8_t> plaintext(req.body.begin(), req.body.end());
+            if (plaintext.empty()) {
+                res.status = 400;
+                res.set_content(jerr("request body is empty"), "application/json");
+                return;
+            }
+
+            std::string token = create_wrapped(env, user_opt->user_id, plaintext, ttl_secs);
+            log->info("[cmd=wrap] user={} ttl={} addr={}", claims->username, ttl_secs, req.remote_addr);
+            res.set_content(json{{"token", token}}.dump(), "application/json");
+
+        } catch (const std::exception& e) {
+            log->error("[cmd=wrap] error={} addr={}", e.what(), req.remote_addr);
+            res.status = 400;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
+    // ── GET /wrapped/:token — redeem a wrapping token (unauthenticated) ───────
+    svr.Get(R"(/wrapped/([A-Za-z0-9_\-]+))", [&](const httplib::Request& req, httplib::Response& res) {
+        auto log = get_logger();
+        std::string token = req.matches[1].str();
+        try {
+            auto plaintext = unwrap(env, token);
+            log->info("[cmd=unwrap] addr={}", req.remote_addr);
+            res.set_content(
+                std::string(plaintext.begin(), plaintext.end()),
+                "text/plain; charset=utf-8");
+        } catch (const std::exception& e) {
+            log->warn("[cmd=unwrap] error={} addr={}", e.what(), req.remote_addr);
+            res.status = 404;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
 }
 
 } // anonymous namespace
@@ -1064,6 +1146,13 @@ void run_server(SarekEnv&          env,
                 get_logger()->info("token.purge_expired: background count={}", n);
             } catch (const std::exception& e) {
                 get_logger()->error("token.purge_expired: error={}", e.what());
+            }
+            try {
+                int n = purge_expired_wrapped(env);
+                if (n > 0)
+                    get_logger()->info("wrap.purge_expired: background count={}", n);
+            } catch (const std::exception& e) {
+                get_logger()->error("wrap.purge_expired: error={}", e.what());
             }
         }
     });

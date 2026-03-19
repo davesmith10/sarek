@@ -4,6 +4,10 @@ project(sarek LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ── sarek_keyring ─────────────────────────────────────────────────────────────
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../keyring
+                 ${CMAKE_CURRENT_BINARY_DIR}/keyring_build)
+
 # ── Dependencies ──────────────────────────────────────────────────────────────
 find_package(OpenSSL REQUIRED)
 find_package(yaml-cpp REQUIRED)
@@ -18,6 +22,10 @@ find_library(FYAML_LIB fyaml REQUIRED HINTS /usr/local/lib)
 find_path(FYAML_INC libfyaml.h REQUIRED HINTS /usr/local/include)
 
 # libcrystals (installed) + its transitive dynamic deps
+# Override CRYSTALS_LIB and CRYSTALS_INC via -D flags to use a dev build, e.g.:
+#   cmake -S sarek -B sarek/build \
+#     -DCRYSTALS_LIB=/path/to/libcrystals.a \
+#     -DCRYSTALS_INC=/path/to/libcrystals/include
 find_library(CRYSTALS_LIB crystals PATHS /usr/local/lib REQUIRED)
 find_library(XKCP_LIB     XKCP     PATHS /usr/local/lib REQUIRED)
 find_library(BLAKE3_LIB   blake3
@@ -28,7 +36,7 @@ find_library(TBB_LIB      tbb
 # Header-only deps for modules that call crystals internals directly
 set(MSGPACK_INC /mnt/c/Users/daves/OneDrive/Desktop/Crystals/msgpack-c/include)
 set(SCRYPT_KDF_INC /mnt/c/Users/daves/OneDrive/Desktop/Crystals/scrypt/libscrypt-kdf)
-set(CRYSTALS_INC /usr/local/include)
+set(CRYSTALS_INC /usr/local/include CACHE PATH "Path to crystals public headers (parent of crystals/)")
 set(XKCP_INC /mnt/c/Users/daves/OneDrive/Desktop/Crystals/XKCP/bin/x86-64/libXKCP.so.headers)
 
 # ── spdlog (compiled for performance) ─────────────────────────────────────────
@@ -77,7 +85,7 @@ target_include_directories(sarek_db PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${BDB_INC}
 )
-target_link_libraries(sarek_db PUBLIC ${BDB_LIB} sarek_log)
+target_link_libraries(sarek_db PUBLIC ${BDB_LIB} sarek_log sarek_keyring)
 target_compile_options(sarek_db PRIVATE -Wall -Wextra)
 
 add_executable(sarek_db_test
@@ -120,6 +128,7 @@ target_link_libraries(sarek_bootstrap PUBLIC
     ${BLAKE3_LIB}
     ${TBB_LIB}
     OpenSSL::Crypto
+    yaml-cpp
 )
 target_compile_options(sarek_bootstrap PRIVATE -Wall -Wextra)
 
@@ -198,6 +207,11 @@ target_compile_options(sarek_http PRIVATE -Wall -Wextra)
 # ── Module 8: sarek server executable ────────────────────────────────────────
 add_executable(sarek
     main.cpp
+)
+target_include_directories(sarek PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CRYSTALS_INC}
+    ${XKCP_INC}
 )
 target_link_libraries(sarek PRIVATE sarek_http sarek_log)
 target_compile_options(sarek PRIVATE -Wall -Wextra)

@@ -2,6 +2,8 @@
 #include "bootstrap/bootstrap.hpp"
 #include "bootstrap/user_record.hpp"
 
+#include <crystals/tray.hpp>
+
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -27,11 +29,16 @@ static sarek::SarekConfig make_cfg(const std::string& path) {
     return cfg;
 }
 
+// Helper: create a test system tray (Level3) for bootstrap calls.
+static Tray make_test_system_tray() {
+    return make_tray(TrayType::Level3, "system");
+}
+
 // ---------------------------------------------------------------------------
 static void test_issue_validate() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     // Load system-token tray (unencrypted, Level2)
     Tray tok_tray = sarek::load_tray_by_alias(*env, "system-token");
@@ -64,7 +71,7 @@ static void test_issue_validate() {
 static void test_expired_token() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     Tray tok_tray  = sarek::load_tray_by_alias(*env, "system-token");
     auto user_opt  = sarek::load_user(*env, "admin");
@@ -91,7 +98,7 @@ static void test_expired_token() {
 static void test_wrong_tray_rejected() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     Tray tok_tray    = sarek::load_tray_by_alias(*env, "system-token");
     auto user_opt    = sarek::load_user(*env, "admin");
@@ -116,7 +123,7 @@ static void test_wrong_tray_rejected() {
 static void test_authenticate_user_correct() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     auto result = sarek::authenticate_user(*env, "admin", "secret");
     assert(result.has_value());
@@ -131,7 +138,7 @@ static void test_authenticate_user_correct() {
 static void test_authenticate_user_wrong_password() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     auto result = sarek::authenticate_user(*env, "admin", "wrongpassword");
     assert(!result.has_value());
@@ -144,7 +151,7 @@ static void test_authenticate_user_wrong_password() {
 static void test_authenticate_user_not_found() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     bool threw = false;
     try {
@@ -162,7 +169,7 @@ static void test_authenticate_user_not_found() {
 static void test_locked_user_rejected() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
 
     // Manually insert a locked user
     sarek::UserRecord locked;
@@ -188,22 +195,24 @@ static void test_locked_user_rejected() {
     fs::remove_all(dir);
 }
 
-static void test_load_tray_by_alias_encrypted_throws() {
+static void test_load_system_tray_from_keyring() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
-    auto env = sarek::run_bootstrap(cfg, "secret", 14);
+    Tray sys = make_test_system_tray();
+    auto env = sarek::run_bootstrap(cfg, "secret", sys, 14);
 
-    // system tray is PWENC-encrypted; load_tray_by_alias must throw
-    bool threw = false;
-    try {
-        sarek::load_tray_by_alias(*env, "system");
-    } catch (const std::runtime_error& e) {
-        std::string msg(e.what());
-        threw = (msg.find("password-encrypted") != std::string::npos);
-    }
-    assert(threw);
+    // System tray is stored as enc=0 (plain) and also in keyring.
+    // load_tray_by_alias should succeed (not throw).
+    Tray loaded_from_db = sarek::load_tray_by_alias(*env, "system");
+    assert(loaded_from_db.id == sys.id);
+    assert(loaded_from_db.tray_type == TrayType::Level3);
 
-    std::puts("load encrypted tray throws: OK");
+    // load_system_tray (from keyring) should return same tray.
+    Tray loaded_from_kr = sarek::load_system_tray(*env);
+    assert(loaded_from_kr.id == sys.id);
+    assert(loaded_from_kr.tray_type == TrayType::Level3);
+
+    std::puts("load system tray (db and keyring): OK");
 
     fs::remove_all(dir);
 }
@@ -218,7 +227,7 @@ int main() {
     test_authenticate_user_wrong_password();
     test_authenticate_user_not_found();
     test_locked_user_rejected();
-    test_load_tray_by_alias_encrypted_throws();
+    test_load_system_tray_from_keyring();
     test_expired_token();    // ~1 second sleep
 
     std::puts("\nAll auth tests passed.");

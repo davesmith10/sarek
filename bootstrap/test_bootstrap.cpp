@@ -1,6 +1,8 @@
 #include "bootstrap/bootstrap.hpp"
 #include "bootstrap/user_record.hpp"
 
+#include <crystals/tray.hpp>
+
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -75,7 +77,8 @@ static void test_run_bootstrap() {
     cfg.max_data_node_sz = 1048576;
 
     // Use n_log2=14 for speed (2^14 = 16384 iterations).
-    auto env = sarek::run_bootstrap(cfg, "testpassword", 14);
+    Tray sys_tray = make_tray(TrayType::Level3, "system");
+    auto env = sarek::run_bootstrap(cfg, "testpassword", sys_tray, 14);
     assert(env != nullptr);
 
     // ── tray_alias entries ───────────────────────────────────────────────────
@@ -94,6 +97,14 @@ static void test_run_bootstrap() {
     assert(tok_rec_bytes.has_value() && !tok_rec_bytes->empty());
 
     std::puts("bootstrap tray records: OK");
+
+    // ── system tray in keyring ───────────────────────────────────────────────
+    // load_system_tray() must succeed (keyring blob was populated by run_bootstrap)
+    Tray kr_tray = sarek::load_system_tray(*env);
+    assert(kr_tray.id == sys_tray.id);
+    assert(kr_tray.tray_type == TrayType::Level3);
+
+    std::puts("bootstrap system tray in keyring: OK");
 
     // ── admin user record ────────────────────────────────────────────────────
     auto user_bytes = env->user().get(cfg.admin_user);
@@ -135,7 +146,7 @@ int main() {
     test_hash_verify();
     test_user_record_roundtrip();
     test_needs_bootstrap();
-    test_run_bootstrap();  // ~0.5s with n_log2=14 (2 scrypt calls)
+    test_run_bootstrap();  // ~0.5s with n_log2=14 (1 scrypt call for admin password)
 
     std::puts("\nAll bootstrap tests passed.");
     return 0;

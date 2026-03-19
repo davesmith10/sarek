@@ -166,6 +166,29 @@ std::vector<TokenRecord> list_tokens(SarekEnv& env);
 int purge_expired_tokens(SarekEnv& env);
 
 // ---------------------------------------------------------------------------
+// WrapService — one-time secret delivery with TTL
+// ---------------------------------------------------------------------------
+
+struct WrappedRecord {
+    uint64_t user_id = 0;
+    int64_t  expiry  = 0;   // unix epoch seconds
+};
+
+// Create a wrapped secret. Encrypts plaintext with the "wrap" tray alias,
+// stores in wrapped+wrapper_lookup DBs. Returns base64url-encoded 16-byte token.
+// ttl_secs must be in [600, 432000] (10 min – 5 days).
+std::string create_wrapped(SarekEnv& env, uint64_t user_id,
+                           const std::vector<uint8_t>& plaintext,
+                           int64_t ttl_secs);
+
+// Redeem a wrapping token. Atomically deletes both DB records on success.
+// Throws on: not found, expired, "wrap" tray not found, decryption failure.
+std::vector<uint8_t> unwrap(SarekEnv& env, const std::string& base64url_token);
+
+// Delete wrapped+wrapper_lookup records where expiry < now.
+int purge_expired_wrapped(SarekEnv& env);
+
+// ---------------------------------------------------------------------------
 // Admin operations
 // ---------------------------------------------------------------------------
 
