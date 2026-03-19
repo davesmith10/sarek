@@ -26,7 +26,7 @@ find_path(FYAML_INC libfyaml.h REQUIRED HINTS /usr/local/include)
 #   cmake -S sarek -B sarek/build \
 #     -DCRYSTALS_LIB=/path/to/libcrystals.a \
 #     -DCRYSTALS_INC=/path/to/libcrystals/include
-find_library(CRYSTALS_LIB crystals PATHS /usr/local/lib REQUIRED)
+find_library(CRYSTALS_LIB crystals-1.0 PATHS /usr/local/lib REQUIRED)
 find_library(XKCP_LIB     XKCP     PATHS /usr/local/lib REQUIRED)
 find_library(BLAKE3_LIB   blake3
     PATHS /mnt/c/Users/daves/OneDrive/Desktop/Crystals/local/lib64 REQUIRED)
@@ -114,6 +114,7 @@ add_library(sarek_bootstrap STATIC
 target_include_directories(sarek_bootstrap PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CRYSTALS_INC}
+    ${XKCP_INC}
 )
 target_include_directories(sarek_bootstrap PRIVATE
     ${MSGPACK_INC}

@@ -5,8 +5,7 @@
 #include "bootstrap/user_record.hpp"
 #include "log/log.hpp"
 
-#include <crystals/base64.hpp>
-#include <crystals/tray.hpp>
+#include <crystals/crystals.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -15,8 +14,6 @@
 
 #include <openssl/ssl.h>
 #include <openssl/rand.h>
-
-#include <crystals/token_format.hpp>
 
 #include <atomic>
 #include <condition_variable>

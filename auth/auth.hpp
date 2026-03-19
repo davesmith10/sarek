@@ -4,7 +4,7 @@
 #include "bootstrap/bootstrap.hpp"    // hash_password, verify_password
 #include "bootstrap/user_record.hpp"
 
-#include <crystals/tray.hpp>
+#include <crystals/crystals.hpp>
 
 #include <cstdint>
 #include <optional>

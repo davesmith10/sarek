@@ -1,7 +1,7 @@
 #include "bootstrap/bootstrap.hpp"
 #include "bootstrap/user_record.hpp"
 
-#include <crystals/tray.hpp>
+#include <crystals/crystals.hpp>
 
 #include <cassert>
 #include <cstdio>

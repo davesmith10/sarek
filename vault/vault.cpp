@@ -2,15 +2,9 @@
 #include "bootstrap/user_record.hpp"
 #include "log/log.hpp"
 
-#include <crystals/ec_kem.hpp>
-#include <crystals/kyber_kem.hpp>
-#include <crystals/kdf.hpp>
-#include <crystals/symmetric.hpp>
-#include <crystals/tray_pack.hpp>
+#include <crystals/crystals.hpp>
 
 #include <msgpack.hpp>
-
-#include <crystals/base64.hpp>
 
 #include <openssl/rand.h>
 

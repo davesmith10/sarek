@@ -1,13 +1,7 @@
 #include "bootstrap/bootstrap.hpp"
 #include "bootstrap/user_record.hpp"
 
-#include <crystals/tray.hpp>
-#include <crystals/tray_pack.hpp>
-#include <crystals/kyber_api.hpp>
-#include <crystals/symmetric.hpp>
-#include <crystals/pw_format.hpp>
-#include <crystals/base64.hpp>
-#include <crystals/secure_tray.hpp>
+#include <crystals/crystals.hpp>
 
 #include <msgpack.hpp>
 #include <yaml-cpp/yaml.h>

@@ -4,7 +4,7 @@
 #include "db/db.hpp"
 #include "bootstrap/user_record.hpp"
 
-#include <crystals/tray.hpp>
+#include <crystals/crystals.hpp>
 
 #include <memory>
 #include <string>

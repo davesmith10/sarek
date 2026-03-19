@@ -6,7 +6,7 @@
 #include "bootstrap/user_record.hpp"
 #include "auth/auth.hpp"              // load_tray_by_alias, load_user
 
-#include <crystals/tray.hpp>
+#include <crystals/crystals.hpp>
 
 #include <cstdint>
 #include <string>

@@ -2,7 +2,7 @@
 #include "bootstrap/bootstrap.hpp"
 #include "auth/auth.hpp"
 
-#include <crystals/tray.hpp>
+#include <crystals/crystals.hpp>
 
 #include <cassert>
 #include <cstdio>

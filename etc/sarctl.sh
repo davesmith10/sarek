@@ -8,22 +8,31 @@ SAREK_HOME=/mnt/c/Users/daves/OneDrive/Desktop/SAREK
 
 SAREK_BIN="${SAREK_BIN:-$SAREK_HOME/sarek/build/sarek}"
 SAREK_CONFIG="${SAREK_CONFIG:-$SAREK_HOME/sarek/tmp/sarek.yml}"
-SAREK_CERT="${SAREK_CERT:-$SAREK_HOME/sarek/tmp/cert.pem}"
-SAREK_KEY="${SAREK_KEY:-$SAREK_HOME/sarek/tmp/key.pem}"
 SAREK_LOG="${SAREK_LOG:-$SAREK_HOME/sarek/tmp/sarek.log}"
 SAREK_PID="${SAREK_PID:-$SAREK_HOME/sarek/tmp/sarek.pid}"
+# Optional overrides — TLS cert/key default to the values in sarek.yml (tls.cert / tls.key)
+SAREK_CERT="${SAREK_CERT:-}"
+SAREK_KEY="${SAREK_KEY:-}"
+# Set SAREK_DEV=1 to force plain-HTTP dev mode (suppresses TLS even if cert/key are configured)
+SAREK_DEV="${SAREK_DEV:-}"
+# Optional: override config user.password-file and tray.password-file
+SAREK_PASSWORD_FILE="${SAREK_PASSWORD_FILE:-}"
+SAREK_TRAY_PASSWORD_FILE="${SAREK_TRAY_PASSWORD_FILE:-}"
 
 usage() {
     cat <<EOF
 Usage: sarctl {start|stop|restart|status}
 
 Environment variables (override defaults):
-  SAREK_BIN     Path to sarek binary     [${SAREK_BIN}]
-  SAREK_CONFIG  Path to sarek.yml        [${SAREK_CONFIG}]
-  SAREK_CERT    Path to TLS cert PEM     [${SAREK_CERT:-(none, dev mode)}]
-  SAREK_KEY     Path to TLS key PEM      [${SAREK_KEY:-(none, dev mode)}]
-  SAREK_LOG     stdout/stderr log file   [${SAREK_LOG}]
-  SAREK_PID     PID file path            [${SAREK_PID}]
+  SAREK_BIN                Path to sarek binary              [${SAREK_BIN}]
+  SAREK_CONFIG             Path to sarek.yml                 [${SAREK_CONFIG}]
+  SAREK_LOG                stdout/stderr log file            [${SAREK_LOG}]
+  SAREK_PID                PID file path                     [${SAREK_PID}]
+  SAREK_CERT               TLS cert PEM (overrides config)   [${SAREK_CERT:-(from config)}]
+  SAREK_KEY                TLS key PEM  (overrides config)   [${SAREK_KEY:-(from config)}]
+  SAREK_DEV                Set to 1 for plain-HTTP dev mode  [${SAREK_DEV:-(off)}]
+  SAREK_PASSWORD_FILE      Admin password file (overrides config)      [${SAREK_PASSWORD_FILE:-(from config)}]
+  SAREK_TRAY_PASSWORD_FILE System tray password file (overrides config)[${SAREK_TRAY_PASSWORD_FILE:-(from config)}]
 EOF
 }
 
@@ -76,12 +85,17 @@ cmd_start() {
 
     # Build argument list
     local args=("--config" "$SAREK_CONFIG")
-    if [[ -n "$SAREK_CERT" && -n "$SAREK_KEY" ]]; then
-        args+=("--cert" "$SAREK_CERT" "--key" "$SAREK_KEY")
-    else
-        echo "Warning: no cert/key configured — starting in --dev mode" >&2
+    if [[ -n "$SAREK_DEV" ]]; then
         args+=("--dev")
+    elif [[ -n "$SAREK_CERT" && -n "$SAREK_KEY" ]]; then
+        args+=("--cert" "$SAREK_CERT" "--key" "$SAREK_KEY")
+    elif [[ -n "$SAREK_CERT" || -n "$SAREK_KEY" ]]; then
+        echo "Error: SAREK_CERT and SAREK_KEY must both be set (or neither)" >&2
+        return 1
     fi
+    # TLS cert/key not specified here — will use tls.cert / tls.key from sarek.yml
+    [[ -n "$SAREK_PASSWORD_FILE" ]]      && args+=("--password-file"      "$SAREK_PASSWORD_FILE")
+    [[ -n "$SAREK_TRAY_PASSWORD_FILE" ]] && args+=("--tray-password-file" "$SAREK_TRAY_PASSWORD_FILE")
 
     # Ensure log directory exists
     local log_dir

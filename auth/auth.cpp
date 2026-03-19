@@ -1,10 +1,7 @@
 #include "auth/auth.hpp"
 #include "bootstrap/user_record.hpp"
 
-#include <crystals/tray_pack.hpp>
-#include <crystals/ec_sig.hpp>
-#include <crystals/token_format.hpp>
-#include <crystals/hyke_format.hpp>   // parse_uuid
+#include <crystals/crystals.hpp>
 
 #include <msgpack.hpp>
 

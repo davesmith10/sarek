@@ -4,7 +4,7 @@
 #include "http/http.hpp"
 #include "log/log.hpp"
 
-#include <crystals/tray_pack.hpp>
+#include <crystals/crystals.hpp>
 
 #include <yaml-cpp/yaml.h>
 
