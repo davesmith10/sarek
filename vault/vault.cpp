@@ -140,19 +140,34 @@ void validate_path(const std::string& path) {
 
 std::vector<uint8_t> obiwan_encrypt(const std::vector<uint8_t>& plaintext,
                                      const Tray& tray) {
-    if (tray.slots.size() < 2)
-        throw std::runtime_error("obiwan_encrypt: tray must have at least 2 slots");
+    if (tray.slots.empty())
+        throw std::runtime_error("obiwan_encrypt: tray has no slots");
 
-    const Slot& kem_classical = tray.slots[0];
-    const Slot& kem_pq        = tray.slots[1];
-
-    // Encapsulate
+    // ---- Classical KEM ----
     std::vector<uint8_t> ct_classical, ss_classical;
-    ec_kem::encaps(kem_classical.alg_name, kem_classical.pk, ct_classical, ss_classical);
+    if (tray.profile_group == "mceliece+slhdsa") {
+        if (tray.slots.size() >= 2) {
+            // McEliece Level2+: slot[0] is classical EC
+            ec_kem::encaps(tray.slots[0].alg_name, tray.slots[0].pk,
+                           ct_classical, ss_classical);
+        }
+        // McEliece Level1: no classical slot — ct_classical stays empty
+    } else {
+        // crystals group: slot[0] is EC
+        ec_kem::encaps(tray.slots[0].alg_name, tray.slots[0].pk,
+                       ct_classical, ss_classical);
+    }
 
+    // ---- PQ KEM ----
+    // slot[0] for McEliece Level1 (single-slot); slot[1] for all others
+    const Slot& kem_pq = (tray.slots.size() == 1) ? tray.slots[0] : tray.slots[1];
     std::vector<uint8_t> ct_pq, ss_pq;
-    kyber_kem::encaps(kyber_kem::level_from_alg(kem_pq.alg_name),
-                      kem_pq.pk, ct_pq, ss_pq);
+    if (tray.profile_group == "mceliece+slhdsa") {
+        mceliece_kem::encaps(kem_pq.alg_name, kem_pq.pk, ct_pq, ss_pq);
+    } else {
+        kyber_kem::encaps(kyber_kem::level_from_alg(kem_pq.alg_name),
+                          kem_pq.pk, ct_pq, ss_pq);
+    }
 
     // Derive key
     auto key = derive_key_shake(ss_classical, ss_pq, ct_classical, ct_pq);
@@ -223,18 +238,34 @@ std::vector<uint8_t> obiwan_decrypt(const std::vector<uint8_t>& wire,
     // Remaining = payload (nonce || tag || ct)
     std::vector<uint8_t> payload(p, wire.data() + wire.size());
 
-    if (tray.slots.size() < 2)
-        throw std::runtime_error("obiwan_decrypt: tray must have at least 2 slots");
+    if (tray.slots.empty())
+        throw std::runtime_error("obiwan_decrypt: tray has no slots");
 
-    const Slot& kem_classical = tray.slots[0];
-    const Slot& kem_pq        = tray.slots[1];
-
+    // ---- Classical KEM ----
     std::vector<uint8_t> ss_classical;
-    ec_kem::decaps(kem_classical.alg_name, kem_classical.sk, ct_classical, ss_classical);
+    if (tray.profile_group == "mceliece+slhdsa") {
+        if (tray.slots.size() >= 2 && ct_classical_len > 0) {
+            // McEliece Level2+: slot[0] is classical EC
+            ec_kem::decaps(tray.slots[0].alg_name, tray.slots[0].sk,
+                           ct_classical, ss_classical);
+        }
+        // McEliece Level1: ct_classical is empty — ss_classical stays empty
+    } else {
+        // crystals group: slot[0] is EC
+        ec_kem::decaps(tray.slots[0].alg_name, tray.slots[0].sk,
+                       ct_classical, ss_classical);
+    }
 
+    // ---- PQ KEM ----
+    // slot[0] for McEliece Level1 (single-slot); slot[1] for all others
+    const Slot& kem_pq = (tray.slots.size() == 1) ? tray.slots[0] : tray.slots[1];
     std::vector<uint8_t> ss_pq;
-    kyber_kem::decaps(kyber_kem::level_from_alg(kem_pq.alg_name),
-                      kem_pq.sk, ct_pq, ss_pq);
+    if (tray.profile_group == "mceliece+slhdsa") {
+        mceliece_kem::decaps(kem_pq.alg_name, kem_pq.sk, ct_pq, ss_pq);
+    } else {
+        kyber_kem::decaps(kyber_kem::level_from_alg(kem_pq.alg_name),
+                          kem_pq.sk, ct_pq, ss_pq);
+    }
 
     auto key = derive_key_shake(ss_classical, ss_pq, ct_classical, ct_pq);
     return aes256gcm_decrypt(key.data(), payload);

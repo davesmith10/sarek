@@ -154,17 +154,44 @@ static bool scope_allows(const TokenClaims& c, const std::string& path) {
 }
 
 // ---------------------------------------------------------------------------
+// Tray type enum → string (for JSON output)
+// ---------------------------------------------------------------------------
+
+static std::string tray_type_name(TrayType t) {
+    switch (t) {
+        case TrayType::Level0:          return "level0";
+        case TrayType::Level1:          return "level1";
+        case TrayType::Level2_25519:    return "level2-25519";
+        case TrayType::Level2:          return "level2";
+        case TrayType::Level3:          return "level3";
+        case TrayType::Level5:          return "level5";
+        case TrayType::McEliece_Level1: return "mceliece-level1";
+        case TrayType::McEliece_Level2: return "mceliece-level2";
+        case TrayType::McEliece_Level3: return "mceliece-level3";
+        case TrayType::McEliece_Level4: return "mceliece-level4";
+        case TrayType::McEliece_Level5: return "mceliece-level5";
+        default: return "unknown";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tray type string → TrayType enum
 // ---------------------------------------------------------------------------
 
 static TrayType tray_type_from_str(const std::string& s) {
-    if (s == "level0")  return TrayType::Level0;
-    if (s == "level1")  return TrayType::Level1;
-    if (s == "level2")  return TrayType::Level2;
-    if (s == "level3")  return TrayType::Level3;
-    if (s == "level5")  return TrayType::Level5;
+    if (s == "level0")          return TrayType::Level0;
+    if (s == "level1")          return TrayType::Level1;
+    if (s == "level2")          return TrayType::Level2;
+    if (s == "level3")          return TrayType::Level3;
+    if (s == "level5")          return TrayType::Level5;
+    if (s == "mceliece-level1") return TrayType::McEliece_Level1;
+    if (s == "mceliece-level2") return TrayType::McEliece_Level2;
+    if (s == "mceliece-level3") return TrayType::McEliece_Level3;
+    if (s == "mceliece-level4") return TrayType::McEliece_Level4;
+    if (s == "mceliece-level5") return TrayType::McEliece_Level5;
     throw std::invalid_argument("unknown tray type '" + s + "'; "
-        "valid: level0 level1 level2 level3 level5");
+        "valid: level0 level1 level2 level3 level5 "
+        "mceliece-level1 mceliece-level2 mceliece-level3 mceliece-level4 mceliece-level5");
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +210,7 @@ static json tray_to_json(const Tray& t) {
     return {
         {"id",      t.id},
         {"alias",   t.alias},
-        {"type",    t.type_str},
+        {"type",    tray_type_name(t.tray_type)},
         {"created", t.created},
         {"expires", t.expires},
         {"slots",   slots}
@@ -645,7 +672,7 @@ static void register_routes(
             json out = {
                 {"id",      t.id},
                 {"alias",   t.alias},
-                {"type",    t.type_str},
+                {"type",    tray_type_name(t.tray_type)},
                 {"created", t.created},
                 {"expires", t.expires},
                 {"slots",   slots}

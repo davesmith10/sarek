@@ -25,21 +25,38 @@
 
 ## Configuration File
 
-`sarek` reads `/etc/sarek.yml` by default. Use `--config <path>` to override.
+`sarek` reads a config file. Use `--config <path>`
+
+Example:
 
 ```yaml
 defaults:
   cache-ttl: 300                  # object cache TTL in seconds
   max-data-node-sz: 1mb           # max size for a single secret (b/kb/mb/gb)
 db:
-  path: /var/lib/sarek            # directory for BDB environment files
+  path: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/db     # directory for BDB environment files
 http:
   port: 8443                      # port to listen on
+  # trusted-proxies:              # uncomment if sarek sits behind a reverse proxy
+  #   - 127.0.0.1                 # proxy on same host (e.g. nginx on localhost)
+  #   - 10.0.0.1                  # proxy on a specific remote host
 user:
   adminuser: admin                # username created during bootstrap, change to suit
-```
+  password-file: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/admin-pass.txt # optional, useful for automated testing
+log:
+  dir: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp  # default /var/log
 
-All five fields are required; the server will refuse to start if any is missing.
+## new tls section, flags override this
+tls:
+  cert: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/cert.pem
+  key: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/key.pem
+
+## bootstrapping
+tray:
+  system: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/system.tray.protected.yml
+  password-file: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/admin-pass.txt # optional, useful for automated testing
+  
+```
 
 ---
 
@@ -47,7 +64,7 @@ All five fields are required; the server will refuse to start if any is missing.
 
 ### Self-Signed Certificate (Development / LAN)
 
-Generate a P-256 ECDSA certificate valid for one year:
+Generate a standard P-256 ECDSA certificate valid for one year:
 
 ```bash
 openssl req -x509 \
@@ -95,34 +112,24 @@ Pass those paths to `--cert` and `--key`.
 
 ### TLS Group
 
-In TLS 1.3, the certificate (P-256 ECDSA above) and the key exchange are independent. The certificate authenticates the server's identity; the key exchange establishes the session's shared secret for forward secrecy — a separate negotiation.
+In TLS 1.3, the certificate (P-256 ECDSA above) and the key exchange are independent. The certificate authenticates the server's identity; the 
+key exchange establishes the session's shared secret for forward secrecy — a separate negotiation.
 
-The server advertises `X25519MLKEM768:X25519` as its preferred key exchange group, providing a post-quantum hybrid key exchange for all connections. No special certificate type is needed for this; a standard P-256 or RSA cert works alongside it. OpenSSL 3.5+ and a compatible client (e.g. curl built against OpenSSL 3.5+) will negotiate the hybrid group automatically; older clients fall back to plain X25519.
+The server advertises `X25519MLKEM768:X25519` as its preferred key exchange group, providing a post-quantum hybrid key exchange for
+all connections. No special certificate type is needed for this; a standard P-256 or RSA cert works alongside it. OpenSSL 3.5+ and a 
+compatible client (e.g. curl built against OpenSSL 3.5+) will negotiate the hybrid group automatically; older clients fall back to plain X25519.
 
 ---
 
 ## First-Run Bootstrap
 
-The database directory (`db.path`) must exist and be writable before starting.
+1) Create a crystals profile group tray that is at least level2. This will be used to encrypt the data and tray nodes, your choice, speed over security.
 
-```bash
-sudo mkdir -p /var/lib/sarek
-sudo chown $(whoami) /var/lib/sarek
-```
+2) Setup config file as above
 
-On first start, `sarek` detects an empty database and runs an interactive bootstrap:
+3) edit etc/sarctl.sh to suit
 
-```
-sarek: first-run bootstrap — creating database and system trays
-Admin password:
-Confirm password:
-sarek: bootstrap complete
-```
-
-Bootstrap creates:
-- `system` tray — Level3 hybrid tray, PWENC-encrypted with the admin password
-- `system-token` tray — Level2 hybrid tray, used to sign Bearer tokens
-- An admin user record with full `/*` access assertion
+4) check logs, login as admin using amanda client.
 
 ---
 
