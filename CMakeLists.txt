@@ -21,6 +21,9 @@ find_path(BDB_INC db.h
 find_library(FYAML_LIB fyaml REQUIRED HINTS /usr/local/lib)
 find_path(FYAML_INC libfyaml.h REQUIRED HINTS /usr/local/include)
 
+find_library(JSON_C_LIB json-c REQUIRED HINTS /usr/local/lib64 /usr/local/lib /usr/lib64 /usr/lib)
+find_path(JSON_C_INC json-c/json.h REQUIRED HINTS /usr/local/include /usr/include)
+
 # libcrystals (installed) + its transitive dynamic deps
 # Override CRYSTALS_LIB and CRYSTALS_INC via -D flags to use a dev build, e.g.:
 #   cmake -S sarek -B sarek/build \
@@ -196,12 +199,13 @@ target_include_directories(sarek_http PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CRYSTALS_INC}
 )
-target_include_directories(sarek_http PRIVATE ${FYAML_INC})
+target_include_directories(sarek_http PRIVATE ${FYAML_INC} ${JSON_C_INC})
 target_link_libraries(sarek_http PUBLIC
     sarek_vault
     sarek_log
     OpenSSL::SSL
     ${FYAML_LIB}
+    ${JSON_C_LIB}
 )
 target_compile_options(sarek_http PRIVATE -Wall -Wextra)
 

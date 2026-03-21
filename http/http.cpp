@@ -11,6 +11,8 @@
 
 #include <httplib.h>
 #include <libfyaml.h>
+#include <json-c/json.h>
+#include <json-c/json_pointer.h>
 
 #include <openssl/ssl.h>
 #include <openssl/rand.h>
@@ -312,7 +314,7 @@ static void register_routes(
     });
 
     // ── DELETE /logout ───────────────────────────────────────────────────────
-    // Stateless: server has no session state; client deletes its token file.
+    // Stateless: server has no session state; client deletes its token file. However, we do track tokens in the token db
     svr.Delete("/logout", [&](const httplib::Request& req, httplib::Response& res) {
         auto claims = try_auth(req, res, tok_tray, env);
         if (!claims) return;
@@ -847,6 +849,84 @@ static void register_routes(
             free(result);
             fy_document_destroy(doc);
             res.set_content(value, scalar ? "text/plain" : "application/yaml");
+        } catch (const std::exception& e) {
+            res.status = 404;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+        clear_request_user();
+    });
+
+    // ── GET /secrets/:path/json-extract ──────────────────────────────────────
+    // (registered before /secrets/:path to win regex priority)
+    svr.Get(R"(/secrets/(.+)/json-extract)", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray, env);
+        if (!claims) return;
+        std::string path = "/" + req.matches[1].str();
+        if (!scope_allows(*claims, path)) {
+            get_logger()->warn("[cmd=json-extract] DENIED user={} path={} addr={}",
+                               claims->username, path, req.remote_addr);
+            res.status = 403;
+            res.set_content(jerr("access denied"), "application/json");
+            return;
+        }
+        std::string jptr = req.has_param("jptr") ? req.get_param_value("jptr") : "";
+        if (jptr.empty()) {
+            res.status = 400;
+            res.set_content(jerr("jptr query parameter is required"), "application/json");
+            return;
+        }
+        get_logger()->info("[cmd=json-extract] user={} path={} jptr={} addr={}",
+                           claims->username, path, jptr, req.remote_addr);
+        set_request_user(claims->username);
+        try {
+            MetadataRecord meta = read_metadata(env, path);
+            if (meta.mimetype.empty()) {
+                res.status = 400;
+                res.set_content(jerr("no mimetype stored for this secret"), "application/json");
+                clear_request_user();
+                return;
+            }
+            if (meta.mimetype != "application/json") {
+                res.status = 400;
+                res.set_content(jerr("mimetype '" + meta.mimetype + "' is not application/json"),
+                                "application/json");
+                clear_request_user();
+                return;
+            }
+            auto plaintext = read_secret(env, path, &data_cache);
+            std::string json_str(plaintext.begin(), plaintext.end());
+
+            struct json_object* root = json_tokener_parse(json_str.c_str());
+            if (!root) {
+                res.status = 400;
+                res.set_content(jerr("secret data is not valid JSON"), "application/json");
+                clear_request_user();
+                return;
+            }
+
+            // json_pointer_get returns a borrowed ref from root — do NOT json_object_put it
+            struct json_object* node = nullptr;
+            if (json_pointer_get(root, jptr.c_str(), &node) != 0 || !node) {
+                json_object_put(root);
+                res.status = 404;
+                res.set_content(jerr("jptr '" + jptr + "' not found in document"), "application/json");
+                clear_request_user();
+                return;
+            }
+
+            // Copy value to std::string BEFORE json_object_put(root) — both return borrowed refs
+            std::string value;
+            std::string content_type;
+            if (json_object_get_type(node) == json_type_string) {
+                value = json_object_get_string(node);
+                content_type = "text/plain";
+            } else {
+                value = json_object_to_json_string(node);
+                content_type = "application/json";
+            }
+            json_object_put(root);
+
+            res.set_content(value, content_type);
         } catch (const std::exception& e) {
             res.status = 404;
             res.set_content(jerr(e.what()), "application/json");
