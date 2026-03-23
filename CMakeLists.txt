@@ -29,7 +29,7 @@ find_path(JSON_C_INC json-c/json.h REQUIRED HINTS /usr/local/include /usr/includ
 #   cmake -S sarek -B sarek/build \
 #     -DCRYSTALS_LIB=/path/to/libcrystals.a \
 #     -DCRYSTALS_INC=/path/to/libcrystals/include
-find_library(CRYSTALS_LIB  crystals-1.1 PATHS /usr/local/lib REQUIRED)
+find_library(CRYSTALS_LIB  crystals-1.2 PATHS /usr/local/lib REQUIRED)
 find_library(XKCP_LIB      XKCP         PATHS /usr/local/lib REQUIRED)
 find_library(BLAKE3_LIB   blake3
     PATHS /mnt/c/Users/daves/OneDrive/Desktop/Crystals/local/lib64 REQUIRED)
