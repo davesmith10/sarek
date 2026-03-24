@@ -1,0 +1,12 @@
+[Unit]
+Description=Sarek Secrets Vault
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/crystals/server/bin/sarctl.sh start
+ExecStop=/opt/crystals/server/bin/sarctl.sh stop
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

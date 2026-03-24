@@ -4,12 +4,10 @@
 
 set -euo pipefail
 
-SAREK_HOME=/mnt/c/Users/daves/OneDrive/Desktop/SAREK
-
-SAREK_BIN="${SAREK_BIN:-$SAREK_HOME/sarek/build/sarek}"
-SAREK_CONFIG="${SAREK_CONFIG:-$SAREK_HOME/sarek/tmp/sarek.yml}"
-SAREK_LOG="${SAREK_LOG:-$SAREK_HOME/sarek/tmp/sarek/sarek.log}"
-SAREK_PID="${SAREK_PID:-$SAREK_HOME/sarek/tmp/sarek.pid}"
+SAREK_BIN="${SAREK_BIN:-/opt/crystals/server/bin/sarek}"
+SAREK_CONFIG="${SAREK_CONFIG:-/opt/crystals/server/etc/sarek.yml}"
+SAREK_LOG="${SAREK_LOG:-/opt/crystals/server/log/sarctl.log}"
+SAREK_PID="${SAREK_PID:-/opt/crystals/server/log/sarek.pid}"
 # Optional overrides — TLS cert/key default to the values in sarek.yml (tls.cert / tls.key)
 SAREK_CERT="${SAREK_CERT:-}"
 SAREK_KEY="${SAREK_KEY:-}"

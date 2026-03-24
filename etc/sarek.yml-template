@@ -1,0 +1,31 @@
+
+## sarek config, this is set up for /opt/crystals as the root folder
+
+defaults:
+  cache-ttl: 300                  # object cache TTL in seconds
+  max-data-node-sz: 1mb           # max size for a single secret (b/kb/mb/gb)
+db:
+  path: /opt/crystals/server/db   # directory for BDB environment files
+http:
+  port: 8443                      # port to listen on
+  # trusted-proxies:              # uncomment if sarek sits behind a reverse proxy
+  #   - 127.0.0.1                 # proxy on same host (e.g. nginx on localhost)
+  #   - 10.0.0.1                  # proxy on a specific remote host
+user:
+  adminuser: admin                # username to be created during bootstrap, change to suit (SecOps will want something less obvious)
+  
+                                  # helper 0600 admin password file, otherwise you must pass in admin passord at boot time
+  password-file: /opt/crystals/server/etc/admin-pass.txt
+  
+log:
+  dir: /opt/crystals/server/log   # default /var/log
+
+## new tls section, flags override this and prod would use a "real" X509
+tls:
+  cert: /opt/crystals/server/etc/cert.pem
+  key: /opt/crystals/server/etc/key.pem
+
+## bootstrap, encrypted system tray with 0600 password file
+tray:
+  system: /opt/crystals/server/etc/system.tray.protected.yml
+  password-file: /opt/crystals/server/etc/admin-pass.txt
