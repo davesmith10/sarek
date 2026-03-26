@@ -26,6 +26,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <regex>
 #include <vector>
 
 using json = nlohmann::json;
@@ -927,6 +928,84 @@ static void register_routes(
             json_object_put(root);
 
             res.set_content(value, content_type);
+        } catch (const std::exception& e) {
+            res.status = 404;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+        clear_request_user();
+    });
+
+    // ── GET /secrets/:path/regex-extract ─────────────────────────────────────
+    // (registered before /secrets/:path to win route priority)
+    svr.Get(R"(/secrets/(.+)/regex-extract)", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray, env);
+        if (!claims) return;
+        std::string path = "/" + req.matches[1].str();
+        if (!scope_allows(*claims, path)) {
+            get_logger()->warn("[cmd=regex-extract] DENIED user={} path={} addr={}",
+                               claims->username, path, req.remote_addr);
+            res.status = 403;
+            res.set_content(jerr("access denied"), "application/json");
+            return;
+        }
+        std::string pattern = req.has_param("pattern") ? req.get_param_value("pattern") : "";
+        if (pattern.empty()) {
+            res.status = 400;
+            res.set_content(jerr("pattern query parameter is required"), "application/json");
+            return;
+        }
+        std::string mode_str = req.has_param("mode") ? req.get_param_value("mode") : "ecmascript";
+        std::regex_constants::syntax_option_type syntax = std::regex_constants::ECMAScript;
+        if (mode_str == "ecmascript") {
+            syntax = std::regex_constants::ECMAScript;
+        } else if (mode_str == "basic") {
+            syntax = std::regex_constants::basic;
+        } else if (mode_str == "extended") {
+            syntax = std::regex_constants::extended;
+        } else {
+            res.status = 400;
+            res.set_content(jerr("mode '" + mode_str + "' is invalid (choose ecmascript, basic, or extended)"),
+                            "application/json");
+            return;
+        }
+        get_logger()->info("[cmd=regex-extract] user={} path={} pattern={} mode={} addr={}",
+                           claims->username, path, pattern, mode_str, req.remote_addr);
+        set_request_user(claims->username);
+        try {
+            MetadataRecord meta = read_metadata(env, path);
+            if (meta.mimetype.empty()) {
+                res.status = 400;
+                res.set_content(jerr("no mimetype stored for this secret"), "application/json");
+                clear_request_user();
+                return;
+            }
+            // Accept only text mimetypes
+            bool is_text = (meta.mimetype.rfind("text/", 0) == 0)
+                        || meta.mimetype == "application/json"
+                        || meta.mimetype == "application/yaml"
+                        || meta.mimetype == "application/x-yaml"
+                        || meta.mimetype == "application/yml";
+            if (!is_text) {
+                res.status = 400;
+                res.set_content(jerr("mimetype '" + meta.mimetype + "' is not a text type"),
+                                "application/json");
+                clear_request_user();
+                return;
+            }
+            auto plaintext = read_secret(env, path, &data_cache);
+            std::string content(plaintext.begin(), plaintext.end());
+
+            std::regex re(pattern, syntax);
+            std::smatch m;
+            std::string result;
+            if (std::regex_search(content, m, re))
+                result = m[0].str();
+            res.set_content(result, "text/plain");
+        } catch (const std::regex_error& e) {
+            res.status = 400;
+            res.set_content(jerr(std::string("invalid regex pattern: ") + e.what()), "application/json");
+            clear_request_user();
+            return;
         } catch (const std::exception& e) {
             res.status = 404;
             res.set_content(jerr(e.what()), "application/json");
