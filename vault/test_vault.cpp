@@ -214,6 +214,80 @@ static void test_create_link() {
 }
 
 // ---------------------------------------------------------------------------
+static void test_delete_link() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+    Tray tray = sarek::load_tray_by_alias(*env, "system-token");
+
+    std::vector<uint8_t> data = {'d', 'a', 't', 'a'};
+    sarek::create_secret(*env, "/target", data, tray);
+    sarek::create_link(*env, "/target", "/mylink");
+
+    // delete_link removes path and metadata
+    sarek::delete_link(*env, "/mylink");
+
+    // path is gone — read_secret should throw
+    bool threw = false;
+    try { sarek::read_secret(*env, "/mylink"); }
+    catch (const std::runtime_error&) { threw = true; }
+    assert(threw);
+
+    // metadata record is also gone
+    threw = false;
+    try { sarek::read_metadata(*env, "/mylink"); }
+    catch (const std::runtime_error&) { threw = true; }
+    assert(threw);
+
+    // target is unaffected
+    auto recovered = sarek::read_secret(*env, "/target");
+    assert(recovered == data);
+
+    // deleting a non-link (real secret) should throw
+    threw = false;
+    try { sarek::delete_link(*env, "/target"); }
+    catch (const std::runtime_error&) { threw = true; }
+    assert(threw);
+
+    // deleting a non-existent path should throw
+    threw = false;
+    try { sarek::delete_link(*env, "/nonexistent"); }
+    catch (const std::runtime_error&) { threw = true; }
+    assert(threw);
+
+    std::puts("delete_link: OK");
+    fs::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
+static void test_create_link_cycle() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    // Two-node cycle: /a → /b → /a
+    sarek::create_link(*env, "/b", "/a");
+
+    // confirm /a was created
+    auto meta_a = sarek::read_metadata(*env, "/a");
+    assert(meta_a.link_path == "/b");
+
+    bool threw = false;
+    try { sarek::create_link(*env, "/a", "/b"); }  // would close the cycle
+    catch (const std::runtime_error&) { threw = true; }
+    assert(threw);
+
+    // Self-link: /x → /x
+    threw = false;
+    try { sarek::create_link(*env, "/x", "/x"); }
+    catch (const std::runtime_error&) { threw = true; }
+    assert(threw);
+
+    std::puts("create_link cycle detection: OK");
+    fs::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
 static void test_create_user() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
@@ -350,6 +424,8 @@ int main() {
     test_read_metadata();
     test_list_secrets();
     test_create_link();
+    test_delete_link();
+    test_create_link_cycle();
     test_create_user();
     test_lock_user();
     test_store_and_list_trays();

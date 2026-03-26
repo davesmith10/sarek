@@ -111,7 +111,8 @@ static void init_system_tray_keyring(sarek::SarekEnv& env,
     Tray sys = sarek::import_system_tray(tray_path, tray_pw, tray_pwl);
     OPENSSL_cleanse(tray_pw_buf, sizeof(tray_pw_buf));
 
-    auto sys_plain = tray_mp::pack(sys);
+    std::string sys_yaml = emit_tray_yaml(sys);
+    std::vector<uint8_t> sys_plain(sys_yaml.begin(), sys_yaml.end());
     auto blob = sarek::KeyringBlob::store(
         "sarek:system-tray", sys_plain.data(), sys_plain.size());
     env.set_system_tray_keyring(std::move(blob));

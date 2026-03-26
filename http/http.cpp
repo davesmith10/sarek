@@ -1062,6 +1062,34 @@ static void register_routes(
         clear_request_user();
     });
 
+    // ── DELETE /links/:path ───────────────────────────────────────────────────
+    svr.Delete(R"(/links/(.+))", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray, env);
+        if (!claims) return;
+        set_request_user(claims->username);
+        try {
+            std::string link_path = "/" + req.matches[1].str();
+
+            if (!scope_allows(*claims, link_path)) {
+                get_logger()->warn("[cmd=unlink] DENIED user={} link={} addr={}",
+                                   claims->username, link_path, req.remote_addr);
+                res.status = 403;
+                res.set_content(jerr("access denied"), "application/json");
+                clear_request_user();
+                return;
+            }
+
+            delete_link(env, link_path);
+            get_logger()->info("[cmd=unlink] user={} link={} addr={}",
+                               claims->username, link_path, req.remote_addr);
+            res.set_content(json{{"unlinked", link_path}}.dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+        clear_request_user();
+    });
+
     // ── GET /admin/tokens  (admin only) ─────────────────────────────────────
     svr.Get("/admin/tokens", [&](const httplib::Request& req, httplib::Response& res) {
         auto claims = try_auth(req, res, tok_tray, env);

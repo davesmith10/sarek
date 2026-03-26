@@ -6,6 +6,8 @@
 #include <msgpack.hpp>
 #include <yaml-cpp/yaml.h>
 
+#include <unistd.h>
+
 extern "C" {
 #include "scrypt-kdf.h"
 }
@@ -53,8 +55,34 @@ static std::array<uint8_t, 16> uuid_str_to_bytes(const std::string& s) {
     return out;
 }
 
+// Serialise a Tray to YAML bytes for storage in BDB.
+static std::vector<uint8_t> tray_to_yaml_bytes(const Tray& tray) {
+    std::string s = emit_tray_yaml(tray);
+    return {s.begin(), s.end()};
+}
+
+// Deserialise a Tray from YAML bytes as stored in BDB.
+static Tray tray_from_yaml_bytes(const std::vector<uint8_t>& bytes) {
+    char tmp[] = "/tmp/sarek-tray-XXXXXX";
+    int fd = mkstemp(tmp);
+    if (fd < 0) throw std::runtime_error("tray_from_yaml_bytes: mkstemp failed");
+    if (write(fd, bytes.data(), bytes.size()) != static_cast<ssize_t>(bytes.size())) {
+        close(fd); unlink(tmp);
+        throw std::runtime_error("tray_from_yaml_bytes: write failed");
+    }
+    close(fd);
+    try {
+        Tray t = load_tray_yaml(tmp);
+        unlink(tmp);
+        return t;
+    } catch (...) {
+        unlink(tmp);
+        throw;
+    }
+}
+
 // Pack a tray DB record.
-//   enc  0 = plain tray_mp::pack bytes
+//   enc  0 = plain YAML tray bytes
 //        1 = PWENC wire bytes
 //   flags 0x01 = system tray
 static std::vector<uint8_t> pack_tray_record(
@@ -208,7 +236,7 @@ Tray import_system_tray(const std::string& path,
 
 Tray load_system_tray(const SarekEnv& env) {
     auto bytes = env.get_system_tray_bytes();
-    return tray_mp::unpack(bytes);
+    return tray_from_yaml_bytes(bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -236,8 +264,8 @@ std::unique_ptr<SarekEnv> run_bootstrap(const SarekConfig& cfg,
     auto env = std::make_unique<SarekEnv>(cfg.db_path);
     auto txn = env->begin_txn();
 
-    // ── system tray (imported, stored as plain msgpack enc=0) ────────────────
-    auto sys_plain  = tray_mp::pack(system_tray);
+    // ── system tray (imported, stored as plain YAML enc=0) ──────────────────
+    auto sys_plain  = tray_to_yaml_bytes(system_tray);
     auto sys_id     = uuid_str_to_bytes(system_tray.id);
     auto sys_record = pack_tray_record(0, "system", 0x01, 0, sys_plain);
 
@@ -246,9 +274,9 @@ std::unique_ptr<SarekEnv> run_bootstrap(const SarekConfig& cfg,
     env->tray_alias().put("system",
         std::vector<uint8_t>(sys_id.begin(), sys_id.end()), txn.get());
 
-    // ── system-token tray (Level2, plain msgpack) ─────────────────────────────
+    // ── system-token tray (Level2, plain YAML) ───────────────────────────────
     Tray token_tray = make_tray(TrayType::Level2, "system-token");
-    auto tok_plain  = tray_mp::pack(token_tray);
+    auto tok_plain  = tray_to_yaml_bytes(token_tray);
     auto tok_id     = uuid_str_to_bytes(token_tray.id);
     auto tok_record = pack_tray_record(0, "system-token", 0x01, 0, tok_plain);
 
@@ -269,7 +297,7 @@ std::unique_ptr<SarekEnv> run_bootstrap(const SarekConfig& cfg,
 
     txn->commit();
 
-    // ── Store system tray msgpack bytes in kernel keyring ─────────────────────
+    // ── Store system tray YAML bytes in kernel keyring ────────────────────────
     auto blob = KeyringBlob::store(
         "sarek:system-tray", sys_plain.data(), sys_plain.size());
     env->set_system_tray_keyring(std::move(blob));

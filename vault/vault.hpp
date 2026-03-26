@@ -126,6 +126,10 @@ void create_link(SarekEnv&          env,
                  const std::string& target_path,
                  const std::string& link_path);
 
+// Remove a symlink. Deletes the DB:path entry and DB:metadata record for
+// link_path. Throws if link_path does not exist or is not a symlink.
+void delete_link(SarekEnv& env, const std::string& link_path);
+
 // ---------------------------------------------------------------------------
 // TokenRecord / TokenStatus / TokenService
 // ---------------------------------------------------------------------------

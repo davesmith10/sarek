@@ -8,6 +8,8 @@
 
 #include <openssl/rand.h>
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -16,10 +18,13 @@
 #include <ctime>
 #include <set>
 #include <stdexcept>
+#include <unordered_set>
 #include <string>
 #include <vector>
 
 namespace sarek {
+
+static constexpr int kMaxLinkDepth = 8;
 
 // ---------------------------------------------------------------------------
 // Wire helpers for unarmored OBIWAN
@@ -315,6 +320,30 @@ static TrayRecord parse_tray_record_full(const std::vector<uint8_t>& record) {
     return r;
 }
 
+static std::vector<uint8_t> tray_to_yaml_bytes(const Tray& tray) {
+    std::string s = emit_tray_yaml(tray);
+    return {s.begin(), s.end()};
+}
+
+static Tray tray_from_yaml_bytes(const std::vector<uint8_t>& bytes) {
+    char tmp[] = "/tmp/sarek-tray-XXXXXX";
+    int fd = mkstemp(tmp);
+    if (fd < 0) throw std::runtime_error("tray_from_yaml_bytes: mkstemp failed");
+    if (write(fd, bytes.data(), bytes.size()) != static_cast<ssize_t>(bytes.size())) {
+        close(fd); unlink(tmp);
+        throw std::runtime_error("tray_from_yaml_bytes: write failed");
+    }
+    close(fd);
+    try {
+        Tray t = load_tray_yaml(tmp);
+        unlink(tmp);
+        return t;
+    } catch (...) {
+        unlink(tmp);
+        throw;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal: pack tray DB record
 // ---------------------------------------------------------------------------
@@ -467,7 +496,7 @@ void store_tray(SarekEnv& env, const Tray& tray, uint64_t owner_user_id) {
         throw std::runtime_error("store_tray: alias '" + tray.alias + "' already exists");
 
     auto uuid_bytes = uuid_to_bytes(tray.id);
-    auto blob       = tray_mp::pack(tray);
+    auto blob       = tray_to_yaml_bytes(tray);
     auto record     = pack_tray_record(0, tray.alias, 0, owner_user_id, blob);
 
     auto txn = env.begin_txn();
@@ -486,7 +515,7 @@ Tray get_tray_by_id(SarekEnv& env, const void* tray_uuid_16, size_t len) {
     TrayRecord r = parse_tray_record_full(*bytes);
     if (r.enc != 0)
         throw std::runtime_error("get_tray_by_id: tray is password-encrypted");
-    return tray_mp::unpack(r.blob);
+    return tray_from_yaml_bytes(r.blob);
 }
 
 std::vector<std::string> list_trays_for_user(SarekEnv& env, uint64_t owner_user_id) {
@@ -576,8 +605,10 @@ std::vector<uint8_t> read_secret(
         SarekEnv& env, const std::string& path,
         LruCache<uint64_t, std::vector<uint8_t>>* data_cache) {
     std::string current = path;
+    std::unordered_set<std::string> visited;
+    visited.insert(current);
 
-    for (int hop = 0; hop <= 8; ++hop) {
+    for (;;) {
         auto id_bytes = env.path().get(current);
         if (!id_bytes)
             throw std::runtime_error("read_secret: path '" + current + "' not found");
@@ -586,7 +617,9 @@ std::vector<uint8_t> read_secret(
 
         uint64_t object_id = decode_uint64(id_bytes->data());
 
-        // Check cache first
+        // Check cache first. Link nodes are never inserted into data_cache
+        // (only real-secret object_ids are cached), so a cache hit here always
+        // means we've resolved to an actual data record.
         if (data_cache) {
             auto cached = data_cache->get(object_id);
             if (cached) {
@@ -603,8 +636,12 @@ std::vector<uint8_t> read_secret(
         MetadataRecord meta = unpack_metadata(*meta_bytes);
 
         if (!meta.link_path.empty()) {
-            if (hop == 8)
+            if (visited.count(meta.link_path))
+                throw std::runtime_error(
+                    "read_secret: circular link detected at '" + meta.link_path + "'");
+            if (visited.size() > static_cast<size_t>(kMaxLinkDepth))
                 throw std::runtime_error("read_secret: link chain too long (>8 hops)");
+            visited.insert(meta.link_path);
             current = meta.link_path;
             continue;
         }
@@ -631,8 +668,6 @@ std::vector<uint8_t> read_secret(
 
         return plaintext;
     }
-
-    throw std::runtime_error("read_secret: link chain too long (>8 hops)");
 }
 
 MetadataRecord read_metadata(SarekEnv& env, const std::string& path) {
@@ -672,6 +707,35 @@ void create_link(SarekEnv&          env,
     validate_path(target_path);
     validate_path(link_path);
 
+    // Self-link guard: target and link are the same path.
+    if (link_path == target_path)
+        throw std::runtime_error(
+            "create_link: would create a cycle (self-link '" + link_path + "')");
+
+    // Walk the existing chain from target_path. If any hop resolves to
+    // link_path, reject — this would form a cycle.
+    {
+        std::string cursor = target_path;
+        for (int hop = 0; hop <= kMaxLinkDepth; ++hop) {
+            auto id_bytes = env.path().get(cursor);
+            if (!id_bytes) break;  // target doesn't exist yet, or chain ends — no cycle
+            if (id_bytes->size() != 8) break;  // corrupted, don't block creation
+
+            uint64_t oid = decode_uint64(id_bytes->data());
+            auto mb = env.metadata().get(oid);
+            if (!mb) break;
+
+            MetadataRecord m = unpack_metadata(*mb);
+            if (m.link_path.empty()) break;  // reached a real secret, no cycle possible
+
+            if (m.link_path == link_path)
+                throw std::runtime_error(
+                    "create_link: would create a cycle ('" + link_path +
+                    "' already reachable from '" + target_path + "')");
+            cursor = m.link_path;
+        }
+    }
+
     uint64_t object_id = generate_object_id(env);
 
     MetadataRecord meta;
@@ -695,6 +759,34 @@ void create_link(SarekEnv&          env,
 
     get_logger()->info("link.create: link={} -> target={} by={}",
                        link_path, target_path, get_request_user());
+}
+
+void delete_link(SarekEnv& env, const std::string& link_path) {
+    validate_path(link_path);
+
+    auto id_bytes = env.path().get(link_path);
+    if (!id_bytes)
+        throw std::runtime_error("delete_link: path '" + link_path + "' not found");
+    if (id_bytes->size() != 8)
+        throw std::runtime_error("delete_link: corrupted path entry for '" + link_path + "'");
+
+    uint64_t object_id = decode_uint64(id_bytes->data());
+
+    auto meta_bytes = env.metadata().get(object_id);
+    if (!meta_bytes)
+        throw std::runtime_error("delete_link: missing metadata for object " +
+                                 std::to_string(object_id));
+
+    MetadataRecord meta = unpack_metadata(*meta_bytes);
+    if (meta.link_path.empty())
+        throw std::runtime_error("delete_link: '" + link_path + "' is not a symlink");
+
+    auto txn = env.begin_txn();
+    env.path().del(link_path, txn.get());
+    env.metadata().del(object_id, txn.get());
+    txn->commit();
+
+    get_logger()->info("link.delete: link={} by={}", link_path, get_request_user());
 }
 
 // ---------------------------------------------------------------------------

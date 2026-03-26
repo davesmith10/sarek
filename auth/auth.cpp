@@ -8,6 +8,7 @@
 #include <openssl/rand.h>
 
 #include <cstdio>
+#include <unistd.h>
 #include <cstring>
 #include <ctime>
 #include <sstream>
@@ -115,6 +116,25 @@ static std::vector<uint8_t> parse_tray_record_blob(
     return blob;
 }
 
+static Tray tray_from_yaml_bytes(const std::vector<uint8_t>& bytes) {
+    char tmp[] = "/tmp/sarek-tray-XXXXXX";
+    int fd = mkstemp(tmp);
+    if (fd < 0) throw std::runtime_error("tray_from_yaml_bytes: mkstemp failed");
+    if (write(fd, bytes.data(), bytes.size()) != static_cast<ssize_t>(bytes.size())) {
+        close(fd); unlink(tmp);
+        throw std::runtime_error("tray_from_yaml_bytes: write failed");
+    }
+    close(fd);
+    try {
+        Tray t = load_tray_yaml(tmp);
+        unlink(tmp);
+        return t;
+    } catch (...) {
+        unlink(tmp);
+        throw;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // issue_token
 // ---------------------------------------------------------------------------
@@ -213,7 +233,7 @@ Tray load_tray_by_alias(SarekEnv& env, const std::string& alias) {
             "load_tray_by_alias: tray '" + alias + "' is password-encrypted; "
             "cannot load without password");
 
-    return tray_mp::unpack(blob);
+    return tray_from_yaml_bytes(blob);
 }
 
 bool is_tray_encrypted(SarekEnv& env, const std::string& alias) {
@@ -244,7 +264,7 @@ Tray load_tray_by_alias_pwenc(SarekEnv& env, const std::string& alias,
         throw std::runtime_error("load_tray_by_alias_pwenc: tray '" + alias + "' is not password-encrypted");
 
     auto plain = pwenc_decrypt_blob(blob, password);
-    return tray_mp::unpack(plain);
+    return tray_from_yaml_bytes(plain);
 }
 
 // ---------------------------------------------------------------------------

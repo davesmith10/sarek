@@ -16,51 +16,55 @@
 8. [API Reference](#api-reference)
 9. [YAML Secret Extraction](#yaml-secret-extraction)
 10. [Secret Wrapping](#secret-wrapping)
-11. [curl Examples](#curl-examples)
-12. Server Multi-threading
+11. [Server Multi-threading] (#server-multi-threading)
+12. [curl Examples](#curl-examples) 
 
 ---
 
 ## Setup Steps Prior to First Invocation
 
-## Configuration File
+## Setup the Server Configuration File
 
-`sarek` reads a config file. Use `--config <path>`
+`sarek` reads a yaml config file. Use `--config <path>`
 
-Example:
+Example (from the etc/sarek.yml-template):
 
 ```yaml
+## sarek config, this is set up for /opt/crystals as the install folder
+
 defaults:
   cache-ttl: 300                  # object cache TTL in seconds
   max-data-node-sz: 1mb           # max size for a single secret (b/kb/mb/gb)
 db:
-  path: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/db     # directory for BDB environment files
+  path: /opt/crystals/server/db   # directory for BDB environment files
 http:
   port: 8443                      # port to listen on
   # trusted-proxies:              # uncomment if sarek sits behind a reverse proxy
   #   - 127.0.0.1                 # proxy on same host (e.g. nginx on localhost)
   #   - 10.0.0.1                  # proxy on a specific remote host
 user:
-  adminuser: admin                # username created during bootstrap, change to suit
-  password-file: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/admin-pass.txt # optional, useful for automated testing
+  adminuser: admin                # username to be created during bootstrap, change to suit (SecOps will want something less obvious)
+
+                                  # helper 0600 admin password file, otherwise you must pass in admin passord at boot time
+  password-file: /opt/crystals/server/etc/admin-pass.txt
+
 log:
-  dir: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp  # default /var/log
+  dir: /opt/crystals/server/log   # default /var/log
 
-## new tls section, flags override this
+## new tls section, flags override this and prod would use a "real" X509 Certificate
 tls:
-  cert: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/cert.pem
-  key: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/key.pem
+  cert: /opt/crystals/server/etc/cert.pem
+  key: /opt/crystals/server/etc/key.pem
 
-## bootstrapping
+## bootstrap, encrypted system tray with 0600 password file
 tray:
-  system: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/system.tray.protected.yml
-  password-file: /mnt/c/Users/daves/OneDrive/Desktop/SAREK/sarek/tmp/admin-pass.txt # optional, useful for automated testing
+  system: /opt/crystals/server/etc/system.tray.protected.yml
   
 ```
 
 ---
 
-## TLS Setup
+## Server TLS Setup
 
 ### Self-Signed Certificate (Development / LAN)
 
@@ -123,18 +127,36 @@ compatible client (e.g. curl built against OpenSSL 3.5+) will negotiate the hybr
 
 ## First-Run Bootstrap
 
-1) Create a crystals profile group tray that is at least level2. This will be used to encrypt the data and tray nodes, your choice, speed over security.
+1) Using `scotty`, create a `crystals` profile-group tray with alias "system" that is at least level2. This will be used to encrypt the data and tray nodes.
+   Then protect it with a strong password:
+
+```
+
+scotty/build/scotty keygen --alias system --group crystals --profile level2 --out scotty/tmp/system.tray.yml
+scotty/build/scotty protect --in scotty/tmp/system.tray.yaml --out scotty/tmp/system.tray.protected.yml
+
+```
 
 2) Setup config file as above
 
-3) edit etc/sarctl.sh to suit
+3) edit etc/sarctl.sh if required (it is setup for the install-local.sh layout in /opt/crystals).
 
-4) check logs, login as admin using amanda client.
+4) install the sarek.service-template file in /etc/systemd/system folder as sarek.service (if you wish to use systemd).  
+
+5) Start the service: 
+
+```
+sudo systemctl start sarek
+
+```
+
+5) check logs, then login as admin using amanda client.
+
 
 ---
 
 
-## Running the Server
+## Running the Server Manually
 
 ```
 Usage: sarek [OPTIONS]
@@ -171,12 +193,13 @@ sarek --config ./sarek.yml --dev
 
 ## Logging
 
-`sarek` uses [spdlog](https://github.com/gabime/spdlog) for structured logging. All server events are written to a rotating log file at INFO level.
+`sarek` uses [spdlog](https://github.com/gabime/spdlog) for structured logging. All server events are written to a rotating log file.
 
 ### Log file location
 
 ```
 /var/log/sarek/sarek.log
+
 ```
 
 The directory must exist before starting the server:
@@ -297,7 +320,8 @@ Tokens are raw binary, returned base64-encoded in the `token` field. Pass them b
 Authorization: Bearer <base64-encoded token>
 ```
 
-Tokens are signed with the `system-token` tray (ECDSA P-256 + Dilithium). The server verifies the signature, checks the `usr:<username>` assertion, and then checks the `manage_token` database for revocation on every authenticated request.
+Tokens are signed with the `system-token` tray (ECDSA P-256 + Dilithium). The server verifies the signature, checks the `usr:<username>` assertion, and then checks 
+the `manage_token` database for revocation on every authenticated request.
 
 ---
 
@@ -545,7 +569,8 @@ Content-Type: application/octet-stream
 
 ### `GET /wrapped/:token`
 
-Redeem a wrapping token. No authentication required. The token is the base64url string returned by `POST /wrap`. On success, both the `wrapped` and `wrapper_lookup` DB records are deleted atomically — the token cannot be redeemed again.
+Redeem a wrapping token. No authentication required. The token is the base64url string returned by `POST /wrap`. On success, both the `wrapped` and `wrapper_lookup` 
+DB records are deleted atomically — the token cannot be redeemed again.
 
 **Response `200`:** Raw plaintext bytes with `Content-Type: text/plain; charset=utf-8`.
 
@@ -609,7 +634,8 @@ Revoke all active tokens in the system. All users must re-login.
 
 ## YAML Secret Extraction
 
-The server can extract a single value from a stored YAML secret without requiring the client to download and parse the full document. This is useful when a secret stores a structured credentials file and you need only one field — for example, pulling a password out of a multi-key YAML record.
+The server can extract a single value from a stored YAML secret without requiring the client to download and parse the full document. This is useful when a secret stores a 
+structured credentials file and you need only one field — for example, pulling a password out of a multi-key YAML record.
 
 ### Endpoint
 
@@ -619,7 +645,8 @@ GET /secrets/:path/yaml-extract?ypath=<expression>
 
 Auth: Bearer token required; path scope rules apply as for `GET /secrets/:path`.
 
-The `ypath` query parameter is a [YPATH expression](https://github.com/pantoniou/libfyaml) compatible with the [libfyaml](https://github.com/pantoniou/libfyaml) library. YPATH is a JSONPath-like syntax for YAML documents; simple key paths take the form `/key/subkey`.
+The `ypath` query parameter is a [YPATH expression](https://github.com/pantoniou/libfyaml) compatible with the [libfyaml](https://github.com/pantoniou/libfyaml) library. 
+YPATH is a JSONPath-like syntax for YAML documents; simple key paths take the form `/key/subkey`.
 
 ### Behaviour
 
@@ -656,6 +683,12 @@ curl $CACERT \
 ```
 
 `/data/password` must be percent-encoded as `%2Fdata%2Fpassword` in the query string. The `amanda yaml-extract` command handles this automatically.
+
+---
+
+## JSON Secrets Extraction
+
+TBD
 
 ---
 
