@@ -759,6 +759,7 @@ static void register_routes(
         set_request_user(claims->username);
         try {
             MetadataRecord m = read_metadata(env, path);
+            res.set_header("ETag", "\"" + std::to_string(m.version) + "\"");
             json o = {
                 {"object_id",  m.object_id},
                 {"created",    m.created},
@@ -1067,16 +1068,36 @@ static void register_routes(
             return;
         }
 
+        uint64_t expected_version = 0;
+        auto if_match = req.get_header_value("If-Match");
+        if (!if_match.empty()) {
+            // Strip surrounding quotes: "\"42\"" → "42"
+            std::string ver_str = if_match;
+            if (!ver_str.empty() && ver_str.front() == '"') ver_str = ver_str.substr(1);
+            if (!ver_str.empty() && ver_str.back()  == '"') ver_str.pop_back();
+            try {
+                expected_version = std::stoull(ver_str);
+            } catch (...) {
+                res.status = 400;
+                res.set_content("{\"error\":\"invalid If-Match header\"}", "application/json");
+                return;
+            }
+        }
+
         set_request_user(claims->username);
         try {
             std::vector<uint8_t> body_bytes(req.body.begin(), req.body.end());
-            update_secret(env, path, body_bytes, &data_cache);
+            update_secret(env, path, body_bytes, &data_cache, expected_version);
 
             get_logger()->info("[cmd=edit] OK user={} path={} size={} addr={}",
                                claims->username, path, req.body.size(), req.remote_addr);
 
             res.status = 200;
             res.set_content(jok("updated"), "application/json");
+        } catch (const ETagMismatch& e) {
+            res.status = 412;
+            res.set_content("{\"error\":\"edit conflict: secret was modified by another user\"}", "application/json");
+            return;
         } catch (const std::exception& e) {
             get_logger()->warn("[cmd=edit] FAILED user={} path={} addr={} err={}",
                                claims->username, path, req.remote_addr, e.what());
@@ -1104,6 +1125,7 @@ static void register_routes(
         try {
             // Get mimetype first for the Content-Type header
             MetadataRecord meta = read_metadata(env, path);
+            res.set_header("ETag", "\"" + std::to_string(meta.version) + "\"");
             // (meta may be a link; read_secret follows chain)
             auto plaintext = read_secret(env, path, &data_cache);
 
