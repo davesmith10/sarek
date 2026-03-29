@@ -139,7 +139,8 @@ void update_secret(SarekEnv&                                 env,
 MetadataRecord read_metadata(SarekEnv& env, const std::string& path);
 
 // List all vault paths that begin with prefix (empty = all paths).
-std::vector<std::string> list_secrets(SarekEnv& env, const std::string& prefix = "");
+// Each entry is {path, is_link} where is_link is true when the path is a symlink.
+std::vector<std::pair<std::string,bool>> list_secrets(SarekEnv& env, const std::string& prefix = "");
 
 // Create a symlink: link_path → target_path. Both must be valid paths; link_path
 // must not already exist; target_path need not exist yet.

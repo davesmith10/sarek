@@ -796,14 +796,22 @@ MetadataRecord read_metadata(SarekEnv& env, const std::string& path) {
     return unpack_metadata(*meta_bytes);
 }
 
-std::vector<std::string> list_secrets(SarekEnv& env, const std::string& prefix) {
-    std::vector<std::string> result;
+std::vector<std::pair<std::string,bool>> list_secrets(SarekEnv& env, const std::string& prefix) {
+    std::vector<std::pair<std::string,bool>> result;
 
     env.path().scan(nullptr,
-        [&](const void* k, size_t ksz, const void*, size_t) -> bool {
+        [&](const void* k, size_t ksz, const void* v, size_t /*vsz*/) -> bool {
             std::string key(reinterpret_cast<const char*>(k), ksz);
-            if (prefix.empty() || key.substr(0, prefix.size()) == prefix)
-                result.push_back(key);
+            if (!prefix.empty() && key.substr(0, prefix.size()) != prefix)
+                return true;
+            uint64_t object_id = decode_uint64(v);
+            bool is_link = false;
+            auto mbytes = env.metadata().get(object_id);
+            if (mbytes) {
+                auto meta = unpack_metadata(*mbytes);
+                is_link = !meta.link_path.empty();
+            }
+            result.emplace_back(key, is_link);
             return true;
         });
 

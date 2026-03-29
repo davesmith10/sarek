@@ -1156,9 +1156,9 @@ static void register_routes(
             // Scope filter: non-admin users see only paths they can access
             auto all = list_secrets(env, prefix);
             json arr = json::array();
-            for (const auto& p : all)
+            for (const auto& [p, is_link] : all)
                 if (scope_allows(*claims, p))
-                    arr.push_back(p);
+                    arr.push_back(json{{"path", p}, {"is_link", is_link}});
             res.set_content(json{{"secrets", arr}}.dump(), "application/json");
         } catch (const std::exception& e) {
             res.status = 500;
