@@ -37,7 +37,7 @@ find_library(TBB_LIB      tbb
     PATHS /usr/lib64 /mnt/c/Users/daves/OneDrive/Desktop/Crystals/local/lib64 REQUIRED)
 
 # Header-only deps for modules that call crystals internals directly
-set(MSGPACK_INC /mnt/c/Users/daves/OneDrive/Desktop/Crystals/msgpack-c/include)
+set(MSGPACK_INC /mnt/c/Users/daves/OneDrive/Desktop/SAREK/msgpack-c/include)
 set(SCRYPT_KDF_INC /mnt/c/Users/daves/OneDrive/Desktop/Crystals/scrypt/libscrypt-kdf)
 set(CRYSTALS_INC /usr/local/include CACHE PATH "Path to crystals public headers (parent of crystals/)")
 set(XKCP_INC /mnt/c/Users/daves/OneDrive/Desktop/Crystals/XKCP/bin/x86-64/libXKCP.so.headers)

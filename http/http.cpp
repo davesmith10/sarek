@@ -1052,6 +1052,40 @@ static void register_routes(
         clear_request_user();
     });
 
+    // ── PUT /secrets/:path  (update existing secret in-place) ────────────────
+    svr.Put(R"(/secrets/(.+))", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray, env);
+        if (!claims) return;
+
+        std::string path = "/" + req.matches[1].str();
+
+        if (!scope_allows(*claims, path)) {
+            get_logger()->warn("[cmd=edit] DENIED user={} path={} addr={}",
+                               claims->username, path, req.remote_addr);
+            res.status = 403;
+            res.set_content(jerr("access denied"), "application/json");
+            return;
+        }
+
+        set_request_user(claims->username);
+        try {
+            std::vector<uint8_t> body_bytes(req.body.begin(), req.body.end());
+            update_secret(env, path, body_bytes, &data_cache);
+
+            get_logger()->info("[cmd=edit] OK user={} path={} size={} addr={}",
+                               claims->username, path, req.body.size(), req.remote_addr);
+
+            res.status = 200;
+            res.set_content(jok("updated"), "application/json");
+        } catch (const std::exception& e) {
+            get_logger()->warn("[cmd=edit] FAILED user={} path={} addr={} err={}",
+                               claims->username, path, req.remote_addr, e.what());
+            res.status = 400;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+        clear_request_user();
+    });
+
     // ── GET /secrets/:path ───────────────────────────────────────────────────
     svr.Get(R"(/secrets/(.+))", [&](const httplib::Request& req, httplib::Response& res) {
         auto claims = try_auth(req, res, tok_tray, env);

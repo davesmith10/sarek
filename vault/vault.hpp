@@ -114,6 +114,17 @@ std::vector<uint8_t> read_secret(
     SarekEnv& env, const std::string& path,
     LruCache<uint64_t, std::vector<uint8_t>>* data_cache = nullptr);
 
+// Update the data blob (and metadata.size) for an existing secret in-place.
+// Follows link chains (up to 8 hops) to find the real object_id.
+// Re-encrypts new_plaintext with the tray originally used for the secret.
+// If data_cache is non-null, evicts the old entry and inserts the new plaintext.
+// Throws if path does not exist or is not a real secret (i.e., the resolved
+// record has no data).
+void update_secret(SarekEnv&                                 env,
+                   const std::string&                        path,
+                   const std::vector<uint8_t>&               new_plaintext,
+                   LruCache<uint64_t, std::vector<uint8_t>>* data_cache = nullptr);
+
 // Return the metadata for a path. Does NOT follow links (returns the link record itself).
 MetadataRecord read_metadata(SarekEnv& env, const std::string& path);
 

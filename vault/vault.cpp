@@ -670,6 +670,81 @@ std::vector<uint8_t> read_secret(
     }
 }
 
+void update_secret(SarekEnv&                                 env,
+                   const std::string&                        path,
+                   const std::vector<uint8_t>&               new_plaintext,
+                   LruCache<uint64_t, std::vector<uint8_t>>* data_cache) {
+    validate_path(path);
+
+    // Follow link chain to find the real object_id and metadata.
+    std::string current = path;
+    std::unordered_set<std::string> visited;
+    visited.insert(current);
+
+    uint64_t     object_id = 0;
+    MetadataRecord meta;
+
+    for (;;) {
+        auto id_bytes = env.path().get(current);
+        if (!id_bytes)
+            throw std::runtime_error("update_secret: path '" + current + "' not found");
+        if (id_bytes->size() != 8)
+            throw std::runtime_error("update_secret: corrupted path entry for '" + current + "'");
+
+        object_id = decode_uint64(id_bytes->data());
+
+        auto meta_bytes = env.metadata().get(object_id);
+        if (!meta_bytes)
+            throw std::runtime_error("update_secret: missing metadata for object " +
+                                     std::to_string(object_id));
+
+        meta = unpack_metadata(*meta_bytes);
+
+        if (!meta.link_path.empty()) {
+            if (visited.count(meta.link_path))
+                throw std::runtime_error(
+                    "update_secret: circular link detected at '" + meta.link_path + "'");
+            if (visited.size() > static_cast<size_t>(kMaxLinkDepth))
+                throw std::runtime_error("update_secret: link chain too long (>8 hops)");
+            visited.insert(meta.link_path);
+            current = meta.link_path;
+            continue;
+        }
+        break; // resolved to a real secret
+    }
+
+    // Load the tray originally used to encrypt this secret.
+    auto uuid_bytes = uuid_to_bytes(meta.tray_id);
+    Tray tray = get_tray_by_id(env, uuid_bytes.data(), 16);
+
+    // Re-encrypt with same tray.
+    auto encrypted = obiwan_encrypt(new_plaintext, tray);
+
+    // Update size; preserve all other metadata fields.
+    meta.size = new_plaintext.size();
+    auto meta_bytes_new = pack_metadata(meta);
+
+    // Evict stale cache entry before the transaction begins,
+    // so concurrent readers fall through to the DB rather than
+    // seeing old plaintext while the write is in progress.
+    if (data_cache)
+        data_cache->evict(object_id);
+
+    // Persist atomically
+    auto txn = env.begin_txn();
+    env.data().put(object_id, encrypted, txn.get());
+    env.metadata().put(object_id, meta_bytes_new, txn.get());
+    txn->commit();
+
+    // Re-populate cache with new plaintext now that commit succeeded.
+    if (data_cache)
+        data_cache->put(object_id, new_plaintext);
+
+    get_logger()->info("secret.update: path={} resolved={} object_id={} tray={} size={} user={}",
+                       path, current, object_id, meta.tray_id, new_plaintext.size(),
+                       get_request_user());
+}
+
 MetadataRecord read_metadata(SarekEnv& env, const std::string& path) {
     auto id_bytes = env.path().get(path);
     if (!id_bytes)

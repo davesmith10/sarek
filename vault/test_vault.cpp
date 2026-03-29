@@ -414,6 +414,79 @@ static void test_read_secret_with_cache() {
 }
 
 // ---------------------------------------------------------------------------
+static void test_update_secret_basic() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    Tray tray = sarek::load_tray_by_alias(*env, "system-token");
+    std::vector<uint8_t> orig    = {'h', 'e', 'l', 'l', 'o'};
+    std::vector<uint8_t> updated = {'w', 'o', 'r', 'l', 'd', '!'};
+
+    sarek::create_secret(*env, "/edit/test", orig, tray, "text/plain");
+    sarek::update_secret(*env, "/edit/test", updated, nullptr);
+
+    auto result = sarek::read_secret(*env, "/edit/test");
+    assert(result == updated);
+
+    auto meta = sarek::read_metadata(*env, "/edit/test");
+    assert(meta.size == updated.size());
+
+    std::puts("update_secret basic: OK");
+    fs::remove_all(dir);
+}
+
+static void test_update_secret_cache_invalidated() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    Tray tray = sarek::load_tray_by_alias(*env, "system-token");
+    std::vector<uint8_t> orig    = {1, 2, 3};
+    std::vector<uint8_t> updated = {4, 5, 6};
+
+    sarek::create_secret(*env, "/cache/test", orig, tray);
+
+    sarek::LruCache<uint64_t, std::vector<uint8_t>> cache(64, 3600);
+    sarek::read_secret(*env, "/cache/test", &cache);
+    assert(cache.size() == 1);
+
+    sarek::update_secret(*env, "/cache/test", updated, &cache);
+
+    auto meta = sarek::read_metadata(*env, "/cache/test");
+    auto cached = cache.get(meta.object_id);
+    assert(cached.has_value());
+    assert(*cached == updated);
+
+    auto result = sarek::read_secret(*env, "/cache/test", &cache);
+    assert(result == updated);
+
+    std::puts("update_secret cache invalidate+refresh: OK");
+    fs::remove_all(dir);
+}
+
+static void test_update_secret_follows_link() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    Tray tray = sarek::load_tray_by_alias(*env, "system-token");
+    std::vector<uint8_t> orig    = {'a'};
+    std::vector<uint8_t> updated = {'b', 'c'};
+
+    sarek::create_secret(*env, "/real/data", orig, tray);
+    sarek::create_link(*env, "/real/data", "/link/to/data");
+
+    sarek::update_secret(*env, "/link/to/data", updated, nullptr);
+
+    assert(sarek::read_secret(*env, "/real/data")     == updated);
+    assert(sarek::read_secret(*env, "/link/to/data")  == updated);
+
+    std::puts("update_secret follows link: OK");
+    fs::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
 int main() {
     std::srand(99999);
 
@@ -430,6 +503,9 @@ int main() {
     test_lock_user();
     test_store_and_list_trays();
     test_read_secret_with_cache();
+    test_update_secret_basic();
+    test_update_secret_cache_invalidated();
+    test_update_secret_follows_link();
 
     std::puts("\nAll vault tests passed.");
     return 0;
