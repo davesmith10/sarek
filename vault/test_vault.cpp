@@ -500,7 +500,22 @@ static void test_version_increments_on_create() {
     auto meta = sarek::read_metadata(*env, "/ver/test");
     assert(meta.version == 1);
 
+    // Test that version increments on update
+    std::vector<uint8_t> updated = {'w', 'o', 'r', 'l', 'd'};
+    sarek::update_secret(*env, "/ver/test", updated, nullptr);
+
+    meta = sarek::read_metadata(*env, "/ver/test");
+    assert(meta.version == 2);
+
+    // Test that version increments again on second update
+    std::vector<uint8_t> updated2 = {'f', 'o', 'o', 'b', 'a', 'r'};
+    sarek::update_secret(*env, "/ver/test", updated2, nullptr);
+
+    meta = sarek::read_metadata(*env, "/ver/test");
+    assert(meta.version == 3);
+
     std::puts("version increments on create: OK");
+    std::puts("version increments on update: OK");
     fs::remove_all(dir);
 }
 

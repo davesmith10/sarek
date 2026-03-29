@@ -732,6 +732,7 @@ void update_secret(SarekEnv&                                 env,
 
     // Update size; preserve all other metadata fields.
     meta.size = new_plaintext.size();
+    meta.version += 1;
     auto meta_bytes_new = pack_metadata(meta);
 
     // Evict stale cache entry before the transaction begins,

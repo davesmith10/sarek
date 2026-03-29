@@ -25,7 +25,7 @@ struct MetadataRecord {
     std::string tray_id;           // UUID string of the encrypting tray
     std::string link_path;         // non-empty → this record is a symlink
     uint64_t    creator_id = 0;    // user_id of creator; 0 = unknown (pre-schema records)
-    uint64_t    version    = 0;    // 0 = legacy record; 1 = first write
+    uint64_t    version    = 0;    // 0 = legacy record (pre-schema); incremented on each write
 };
 
 std::vector<uint8_t> pack_metadata(const MetadataRecord& m);
