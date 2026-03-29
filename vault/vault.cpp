@@ -683,16 +683,17 @@ std::vector<uint8_t> read_secret(
 void update_secret(SarekEnv&                                 env,
                    const std::string&                        path,
                    const std::vector<uint8_t>&               new_plaintext,
-                   LruCache<uint64_t, std::vector<uint8_t>>* data_cache) {
+                   LruCache<uint64_t, std::vector<uint8_t>>* data_cache,
+                   uint64_t                                  expected_version) {
     validate_path(path);
 
-    // Follow link chain to find the real object_id and metadata.
+    // 1. Resolve path → object_id (pre-txn, read-only path lookup is fine).
     std::string current = path;
     std::unordered_set<std::string> visited;
     visited.insert(current);
 
     uint64_t     object_id = 0;
-    MetadataRecord meta;
+    std::string  tray_id_for_enc;
 
     for (;;) {
         auto id_bytes = env.path().get(current);
@@ -708,51 +709,73 @@ void update_secret(SarekEnv&                                 env,
             throw std::runtime_error("update_secret: missing metadata for object " +
                                      std::to_string(object_id));
 
-        meta = unpack_metadata(*meta_bytes);
+        auto meta_pre = unpack_metadata(*meta_bytes);
 
-        if (!meta.link_path.empty()) {
-            if (visited.count(meta.link_path))
+        if (!meta_pre.link_path.empty()) {
+            if (visited.count(meta_pre.link_path))
                 throw std::runtime_error(
-                    "update_secret: circular link detected at '" + meta.link_path + "'");
+                    "update_secret: circular link detected at '" + meta_pre.link_path + "'");
             if (visited.size() > static_cast<size_t>(kMaxLinkDepth))
                 throw std::runtime_error("update_secret: link chain too long (>8 hops)");
-            visited.insert(meta.link_path);
-            current = meta.link_path;
+            visited.insert(meta_pre.link_path);
+            current = meta_pre.link_path;
             continue;
         }
+        tray_id_for_enc = meta_pre.tray_id;
         break; // resolved to a real secret
     }
 
-    // Load the tray originally used to encrypt this secret.
-    auto uuid_bytes = uuid_to_bytes(meta.tray_id);
+    // 2. Get the tray for re-encryption (pre-txn is fine).
+    auto uuid_bytes = uuid_to_bytes(tray_id_for_enc);
     Tray tray = get_tray_by_id(env, uuid_bytes.data(), 16);
 
-    // Re-encrypt with same tray.
-    auto encrypted = obiwan_encrypt(new_plaintext, tray);
-
-    // Update size; preserve all other metadata fields.
-    meta.size = new_plaintext.size();
-    meta.version += 1;
-    auto meta_bytes_new = pack_metadata(meta);
-
-    // Evict stale cache entry before the transaction begins,
-    // so concurrent readers fall through to the DB rather than
-    // seeing old plaintext while the write is in progress.
+    // 3. Evict from cache if present (pre-txn, as before).
     if (data_cache)
         data_cache->evict(object_id);
 
-    // Persist atomically
+    // 4. Re-encrypt new_plaintext → encrypted bytes (pre-txn is fine).
+    auto encrypted = obiwan_encrypt(new_plaintext, tray);
+
+    // 5. Begin transaction.
     auto txn = env.begin_txn();
+
+    // 6. Re-read metadata INSIDE txn for atomic version check.
+    auto fresh_bytes = env.metadata().get(object_id, txn.get());
+    if (!fresh_bytes) {
+        txn->abort();
+        throw std::runtime_error("update_secret: missing metadata for object " +
+                                 std::to_string(object_id));
+    }
+
+    // 7. Unpack fresh metadata.
+    auto fresh = unpack_metadata(*fresh_bytes);
+
+    // 8. Version check (skip if expected_version == 0).
+    if (expected_version != 0 && fresh.version != expected_version) {
+        txn->abort();
+        throw ETagMismatch("version mismatch: expected " + std::to_string(expected_version) +
+                           ", found " + std::to_string(fresh.version));
+    }
+
+    // 9-11. Update size and increment version, then pack.
+    fresh.size = new_plaintext.size();
+    fresh.version += 1;
+    auto meta_bytes_new = pack_metadata(fresh);
+
+    // 12-13. Write data and metadata inside transaction.
     env.data().put(object_id, encrypted, txn.get());
     env.metadata().put(object_id, meta_bytes_new, txn.get());
+
+    // 14. Commit.
     txn->commit();
 
-    // Re-populate cache with new plaintext now that commit succeeded.
+    // 15. Populate cache if provided.
     if (data_cache)
         data_cache->put(object_id, new_plaintext);
 
+    // 16. Log the update.
     get_logger()->info("secret.update: path={} resolved={} object_id={} tray={} size={} user={}",
-                       path, current, object_id, meta.tray_id, new_plaintext.size(),
+                       path, current, object_id, fresh.tray_id, new_plaintext.size(),
                        get_request_user());
 }
 

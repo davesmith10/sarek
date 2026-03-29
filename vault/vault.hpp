@@ -15,6 +15,14 @@
 namespace sarek {
 
 // ---------------------------------------------------------------------------
+// ETagMismatch — thrown by update_secret when expected_version doesn't match
+// ---------------------------------------------------------------------------
+class ETagMismatch : public std::runtime_error {
+public:
+    explicit ETagMismatch(const std::string& msg) : std::runtime_error(msg) {}
+};
+
+// ---------------------------------------------------------------------------
 // MetadataRecord — stored in DB:metadata, keyed by object_id (uint64 BE)
 // ---------------------------------------------------------------------------
 struct MetadataRecord {
@@ -124,7 +132,8 @@ std::vector<uint8_t> read_secret(
 void update_secret(SarekEnv&                                 env,
                    const std::string&                        path,
                    const std::vector<uint8_t>&               new_plaintext,
-                   LruCache<uint64_t, std::vector<uint8_t>>* data_cache = nullptr);
+                   LruCache<uint64_t, std::vector<uint8_t>>* data_cache = nullptr,
+                   uint64_t                                  expected_version = 0);
 
 // Return the metadata for a path. Does NOT follow links (returns the link record itself).
 MetadataRecord read_metadata(SarekEnv& env, const std::string& path);

@@ -520,6 +520,84 @@ static void test_version_increments_on_create() {
 }
 
 // ---------------------------------------------------------------------------
+static void test_etag_match_succeeds() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    Tray tray = sarek::load_tray_by_alias(*env, "system-token");
+    std::vector<uint8_t> v1 = {'v', '1'};
+    std::vector<uint8_t> v2 = {'v', '2'};
+
+    sarek::create_secret(*env, "/etag/match", v1, tray, "text/plain");
+
+    auto meta = sarek::read_metadata(*env, "/etag/match");
+    assert(meta.version == 1);
+
+    sarek::update_secret(*env, "/etag/match", v2, nullptr, meta.version);
+
+    meta = sarek::read_metadata(*env, "/etag/match");
+    assert(meta.version == 2);
+
+    std::puts("etag match succeeds: OK");
+    fs::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
+static void test_etag_mismatch_throws() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    Tray tray = sarek::load_tray_by_alias(*env, "system-token");
+    std::vector<uint8_t> v1 = {'v', '1'};
+    std::vector<uint8_t> v2 = {'v', '2'};
+
+    sarek::create_secret(*env, "/etag/mismatch", v1, tray, "text/plain");
+
+    bool threw = false;
+    try {
+        sarek::update_secret(*env, "/etag/mismatch", v2, nullptr, 99);
+    } catch (const sarek::ETagMismatch&) {
+        threw = true;
+    }
+    assert(threw);
+
+    // Data should still be v1 (rollback worked)
+    auto result = sarek::read_secret(*env, "/etag/mismatch");
+    assert(result == v1);
+
+    // Version should still be 1
+    auto meta = sarek::read_metadata(*env, "/etag/mismatch");
+    assert(meta.version == 1);
+
+    std::puts("etag mismatch throws: OK");
+    fs::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
+static void test_etag_zero_skips_check() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    Tray tray = sarek::load_tray_by_alias(*env, "system-token");
+    std::vector<uint8_t> v1 = {'v', '1'};
+    std::vector<uint8_t> v2 = {'v', '2'};
+
+    sarek::create_secret(*env, "/etag/zero", v1, tray, "text/plain");
+
+    // expected_version=0 means skip check
+    sarek::update_secret(*env, "/etag/zero", v2, nullptr, 0);
+
+    auto meta = sarek::read_metadata(*env, "/etag/zero");
+    assert(meta.version == 2);
+
+    std::puts("etag zero skips check: OK");
+    fs::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
 int main() {
     std::srand(99999);
 
@@ -540,6 +618,9 @@ int main() {
     test_update_secret_cache_invalidated();
     test_update_secret_follows_link();
     test_version_increments_on_create();
+    test_etag_match_succeeds();
+    test_etag_mismatch_throws();
+    test_etag_zero_skips_check();
 
     std::puts("\nAll vault tests passed.");
     return 0;
