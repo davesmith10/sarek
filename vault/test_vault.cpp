@@ -487,6 +487,24 @@ static void test_update_secret_follows_link() {
 }
 
 // ---------------------------------------------------------------------------
+static void test_version_increments_on_create() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    Tray tray = sarek::load_tray_by_alias(*env, "system-token");
+    std::vector<uint8_t> data = {'h', 'e', 'l', 'l', 'o'};
+
+    sarek::create_secret(*env, "/ver/test", data, tray, "text/plain");
+
+    auto meta = sarek::read_metadata(*env, "/ver/test");
+    assert(meta.version == 1);
+
+    std::puts("version increments on create: OK");
+    fs::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
 int main() {
     std::srand(99999);
 
@@ -506,6 +524,7 @@ int main() {
     test_update_secret_basic();
     test_update_secret_cache_invalidated();
     test_update_secret_follows_link();
+    test_version_increments_on_create();
 
     std::puts("\nAll vault tests passed.");
     return 0;

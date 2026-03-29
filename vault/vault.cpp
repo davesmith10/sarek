@@ -55,7 +55,11 @@ static uint32_t read_be32(const uint8_t* p) {
 std::vector<uint8_t> pack_metadata(const MetadataRecord& m) {
     const bool has_link    = !m.link_path.empty();
     const bool has_creator = (m.creator_id != 0);
-    const uint32_t map_size = 5 + (has_link ? 1 : 0) + (has_creator ? 1 : 0);
+    const bool has_version = (m.version != 0);
+    const uint32_t map_size = 5
+        + (has_link    ? 1 : 0)
+        + (has_creator ? 1 : 0)
+        + (has_version ? 1 : 0);
 
     msgpack::sbuffer buf;
     msgpack::packer<msgpack::sbuffer> pk(buf);
@@ -71,6 +75,9 @@ std::vector<uint8_t> pack_metadata(const MetadataRecord& m) {
     }
     if (has_creator) {
         pk.pack(std::string("ow")); pk.pack_uint64(m.creator_id);
+    }
+    if (has_version) {
+        pk.pack(std::string("vs")); pk.pack_uint64(m.version);
     }
 
     return {reinterpret_cast<const uint8_t*>(buf.data()),
@@ -106,6 +113,8 @@ MetadataRecord unpack_metadata(const std::vector<uint8_t>& data) {
             m.link_path.assign(kv.val.via.str.ptr, kv.val.via.str.size);
         } else if (key == "ow") {
             m.creator_id = kv.val.as<uint64_t>();
+        } else if (key == "vs") {
+            m.version = kv.val.as<uint64_t>();
         }
     }
     return m;
@@ -583,6 +592,7 @@ void create_secret(SarekEnv&                  env,
     meta.mimetype   = mimetype;
     meta.tray_id    = tray.id;
     meta.creator_id = creator_id;
+    meta.version    = 1;
 
     auto meta_bytes = pack_metadata(meta);
     auto id_enc     = encode_uint64(object_id);
