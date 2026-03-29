@@ -661,26 +661,7 @@ static void register_routes(
                 }
             }
 
-            // Build response including secret key bytes
-            json slots = json::array();
-            for (const auto& s : t.slots) {
-                json slot = {
-                    {"alg",    s.alg_name},
-                    {"pk_b64", base64_encode(s.pk.data(), s.pk.size())}
-                };
-                if (!s.sk.empty())
-                    slot["sk_b64"] = base64_encode(s.sk.data(), s.sk.size());
-                slots.push_back(slot);
-            }
-            json out = {
-                {"id",      t.id},
-                {"alias",   t.alias},
-                {"type",    tray_type_name(t.tray_type)},
-                {"created", t.created},
-                {"expires", t.expires},
-                {"slots",   slots}
-            };
-            res.set_content(out.dump(), "application/json");
+            res.set_content(emit_tray_yaml(t), "text/plain");
         } catch (const std::exception& e) {
             res.status = 404;
             res.set_content(jerr(e.what()), "application/json");
