@@ -742,12 +742,13 @@ static void register_routes(
             MetadataRecord m = read_metadata(env, path);
             res.set_header("ETag", "\"" + std::to_string(m.version) + "\"");
             json o = {
-                {"object_id",  m.object_id},
-                {"created",    m.created},
-                {"size",       m.size},
-                {"mimetype",   m.mimetype},
-                {"tray_id",    m.tray_id},
-                {"creator_id", m.creator_id}
+                {"object_id",   m.object_id},
+                {"created",     m.created},
+                {"size",        m.size},
+                {"mimetype",    m.mimetype},
+                {"tray_id",     m.tray_id},
+                {"tray_alias",  tray_alias_from_id(env, m.tray_id)},
+                {"creator_id",  m.creator_id}
             };
             if (!m.link_path.empty())
                 o["link_path"] = m.link_path;

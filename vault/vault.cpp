@@ -496,6 +496,18 @@ void update_user_password(SarekEnv& env,
 // TrayService
 // ---------------------------------------------------------------------------
 
+std::string tray_alias_from_id(SarekEnv& env, const std::string& uuid_str) {
+    try {
+        auto uuid_bytes = uuid_to_bytes(uuid_str);
+        auto record = env.tray().get(uuid_bytes.data(), 16);
+        if (!record) return {};
+        TrayRecord r = parse_tray_record_full(*record);
+        return r.alias;
+    } catch (...) {
+        return {};
+    }
+}
+
 void store_tray(SarekEnv& env, const Tray& tray, uint64_t owner_user_id) {
     if (tray.alias.empty())
         throw std::runtime_error("store_tray: tray has no alias");

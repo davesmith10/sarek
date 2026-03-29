@@ -90,6 +90,10 @@ void update_user_password(SarekEnv& env,
 // TrayService
 // ---------------------------------------------------------------------------
 
+// Return the alias for a tray UUID string, or empty string if not found.
+// Safe to call on PWENC-encrypted trays — reads only the unencrypted alias field.
+std::string tray_alias_from_id(SarekEnv& env, const std::string& uuid_str);
+
 // Store a plain (unencrypted, enc=0) tray in DB:tray and DB:tray_alias.
 // Uses tray.alias as the alias key. Throws if alias already exists.
 void store_tray(SarekEnv& env, const Tray& tray, uint64_t owner_user_id);
