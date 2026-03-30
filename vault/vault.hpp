@@ -94,9 +94,11 @@ void update_user_password(SarekEnv& env,
 // Safe to call on PWENC-encrypted trays — reads only the unencrypted alias field.
 std::string tray_alias_from_id(SarekEnv& env, const std::string& uuid_str);
 
-// Store a plain (unencrypted, enc=0) tray in DB:tray and DB:tray_alias.
-// Uses tray.alias as the alias key. Throws if alias already exists.
-void store_tray(SarekEnv& env, const Tray& tray, uint64_t owner_user_id);
+// Store a plain (unencrypted, enc=0) tray in DB:tray, DB:tray_alias, and
+// DB:tray_assertions. Uses tray.alias as the alias key.
+// Throws if alias already exists.
+void store_tray(SarekEnv& env, const Tray& tray, uint64_t owner_user_id,
+                const std::vector<std::string>& assertions = {});
 
 // Load a plain tray from the DB by its 16-byte raw UUID key.
 // Throws if not found or if PWENC-encrypted.
@@ -107,6 +109,38 @@ std::vector<std::string> list_trays_for_user(SarekEnv& env, uint64_t owner_user_
 
 // List all tray aliases in the DB (admin view).
 std::vector<std::string> list_all_trays(SarekEnv& env);
+
+// ---------------------------------------------------------------------------
+// Tray Assertions
+// ---------------------------------------------------------------------------
+
+// Write (or overwrite) the assertions list for a tray in DB:tray_assertions.
+// tray_id_str is the canonical UUID string (e.g. "550e8400-...").
+// Pass txn to include in an outer transaction; pass nullptr for auto-commit.
+void store_tray_assertions(SarekEnv& env,
+                           const std::string& tray_id_str,
+                           const std::vector<std::string>& assertions,
+                           SarekTxn* txn = nullptr);
+
+// Read the assertions list for a tray. Returns empty vector if not found.
+std::vector<std::string> get_tray_assertions(SarekEnv& env,
+                                             const std::string& tray_id_str);
+
+// Return true if `path` is permitted by at least one entry in `assertions`.
+// Assertion format: "/*" (full access) or "slc:/prefix/*" (prefix match)
+// or "slc:/exact/path" (exact match). Empty assertions -> always false.
+bool tray_scope_allows(const std::vector<std::string>& assertions,
+                       const std::string& path);
+
+// Return true if the tray's assertions have any overlap with the user's
+// assertions -- i.e., there exists at least one path that both cover.
+// Used by the /usable endpoint to pre-validate mark-default.
+bool tray_usable_by(const std::vector<std::string>& tray_assertions,
+                    const std::vector<std::string>& user_assertions);
+
+// Follow the link chain from `path` and return the tray_id of the real
+// (non-link) metadata record. Throws if path not found or chain is circular.
+std::string resolve_tray_id(SarekEnv& env, const std::string& path);
 
 // ---------------------------------------------------------------------------
 // SecretService

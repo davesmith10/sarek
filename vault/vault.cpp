@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <unordered_set>
@@ -403,6 +404,36 @@ static std::array<uint8_t, 16> uuid_to_bytes(const std::string& s) {
 }
 
 // ---------------------------------------------------------------------------
+// Internal: assertions pack / unpack (msgpack flat array of strings)
+// ---------------------------------------------------------------------------
+
+static std::vector<uint8_t> pack_assertions(const std::vector<std::string>& v) {
+    msgpack::sbuffer buf;
+    msgpack::packer<msgpack::sbuffer> pk(buf);
+    pk.pack_array(static_cast<uint32_t>(v.size()));
+    for (const auto& s : v) pk.pack(s);
+    return {reinterpret_cast<const uint8_t*>(buf.data()),
+            reinterpret_cast<const uint8_t*>(buf.data()) + buf.size()};
+}
+
+static std::vector<std::string> unpack_assertions(const std::vector<uint8_t>& data) {
+    msgpack::object_handle oh = msgpack::unpack(
+        reinterpret_cast<const char*>(data.data()), data.size());
+    const msgpack::object& obj = oh.get();
+    if (obj.type != msgpack::type::ARRAY)
+        throw std::runtime_error("unpack_assertions: expected array");
+    std::vector<std::string> out;
+    out.reserve(obj.via.array.size);
+    for (uint32_t i = 0; i < obj.via.array.size; ++i) {
+        const auto& el = obj.via.array.ptr[i];
+        if (el.type != msgpack::type::STR)
+            throw std::runtime_error("unpack_assertions: expected string element");
+        out.emplace_back(el.via.str.ptr, el.via.str.size);
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Internal: generate a random unique object_id
 // ---------------------------------------------------------------------------
 
@@ -508,24 +539,28 @@ std::string tray_alias_from_id(SarekEnv& env, const std::string& uuid_str) {
     }
 }
 
-void store_tray(SarekEnv& env, const Tray& tray, uint64_t owner_user_id) {
+void store_tray(SarekEnv& env, const Tray& tray, uint64_t owner_user_id,
+                const std::vector<std::string>& assertions) {
     if (tray.alias.empty())
         throw std::runtime_error("store_tray: tray has no alias");
 
-    // Check alias doesn't already exist
     if (env.tray_alias().get(tray.alias))
         throw std::runtime_error("store_tray: alias '" + tray.alias + "' already exists");
 
-    auto uuid_bytes = uuid_to_bytes(tray.id);
-    auto blob       = tray_to_yaml_bytes(tray);
-    auto record     = pack_tray_record(0, tray.alias, 0, owner_user_id, blob);
+    auto uuid_bytes  = uuid_to_bytes(tray.id);
+    auto blob        = tray_to_yaml_bytes(tray);
+    auto record      = pack_tray_record(0, tray.alias, 0, owner_user_id, blob);
+    auto packed_ass  = pack_assertions(assertions);
 
     auto txn = env.begin_txn();
     env.tray().put(uuid_bytes.data(), 16, record.data(), record.size(), txn.get());
     env.tray_alias().put(tray.alias, {uuid_bytes.begin(), uuid_bytes.end()}, txn.get());
+    env.tray_assertions().put(uuid_bytes.data(), 16,
+                              packed_ass.data(), packed_ass.size(), txn.get());
     txn->commit();
 
-    get_logger()->info("tray.store: alias={} owner={}", tray.alias, owner_user_id);
+    get_logger()->info("tray.store: alias={} owner={} assertions={}",
+                       tray.alias, owner_user_id, assertions.size());
 }
 
 Tray get_tray_by_id(SarekEnv& env, const void* tray_uuid_16, size_t len) {
@@ -579,6 +614,128 @@ std::vector<std::string> list_all_trays(SarekEnv& env) {
         });
 
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Tray Assertions
+// ---------------------------------------------------------------------------
+
+void store_tray_assertions(SarekEnv& env,
+                           const std::string& tray_id_str,
+                           const std::vector<std::string>& assertions,
+                           SarekTxn* txn) {
+    auto uuid_bytes = uuid_to_bytes(tray_id_str);
+    auto packed     = pack_assertions(assertions);
+    env.tray_assertions().put(
+        uuid_bytes.data(), uuid_bytes.size(),
+        packed.data(), packed.size(), txn);
+}
+
+std::vector<std::string> get_tray_assertions(SarekEnv& env,
+                                             const std::string& tray_id_str) {
+    auto uuid_bytes = uuid_to_bytes(tray_id_str);
+    auto bytes = env.tray_assertions().get(uuid_bytes.data(), uuid_bytes.size());
+    if (!bytes) return {};
+    return unpack_assertions(*bytes);
+}
+
+bool tray_scope_allows(const std::vector<std::string>& assertions,
+                       const std::string& path) {
+    for (const auto& a : assertions) {
+        if (a == "/*") return true;
+        if (a.size() > 4 && a.substr(0, 4) == "slc:") {
+            std::string scope = a.substr(4);
+            if (!scope.empty() && scope.back() == '*') {
+                std::string pfx = scope.substr(0, scope.size() - 1);
+                if (path.size() >= pfx.size() &&
+                    path.substr(0, pfx.size()) == pfx)
+                    return true;
+            } else {
+                if (path == scope) return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool tray_usable_by(const std::vector<std::string>& tray_assertions,
+                    const std::vector<std::string>& user_assertions) {
+    struct Pattern {
+        std::string prefix; // the path prefix (for wildcard) or exact path (for exact)
+        bool        is_prefix; // true = "prefix/*", false = exact path
+    };
+
+    auto to_pattern = [](const std::string& s) -> std::optional<Pattern> {
+        if (s == "/*") return Pattern{"/", true};
+        if (s.size() > 4 && s.substr(0, 4) == "slc:") {
+            std::string scope = s.substr(4);
+            if (!scope.empty() && scope.back() == '*')
+                return Pattern{scope.substr(0, scope.size() - 1), true};
+            return Pattern{scope, false};
+        }
+        return std::nullopt;
+    };
+
+    // Two patterns overlap if:
+    // - both are prefix: one prefix is a prefix of the other
+    // - one prefix, one exact: the exact path starts with the prefix
+    // - both exact: they are the same string
+    auto overlaps = [](const Pattern& a, const Pattern& b) -> bool {
+        if (a.is_prefix && b.is_prefix) {
+            const auto& shorter = (a.prefix.size() <= b.prefix.size()) ? a.prefix : b.prefix;
+            const auto& longer  = (a.prefix.size() <= b.prefix.size()) ? b.prefix : a.prefix;
+            return longer.substr(0, shorter.size()) == shorter;
+        }
+        if (a.is_prefix && !b.is_prefix) {
+            // b is exact: does a's prefix cover b's exact path?
+            return b.prefix.size() >= a.prefix.size() &&
+                   b.prefix.substr(0, a.prefix.size()) == a.prefix;
+        }
+        if (!a.is_prefix && b.is_prefix) {
+            // a is exact: does b's prefix cover a's exact path?
+            return a.prefix.size() >= b.prefix.size() &&
+                   a.prefix.substr(0, b.prefix.size()) == b.prefix;
+        }
+        // both exact
+        return a.prefix == b.prefix;
+    };
+
+    for (const auto& ta : tray_assertions) {
+        auto pa = to_pattern(ta);
+        if (!pa) continue;
+        for (const auto& ua : user_assertions) {
+            auto pb = to_pattern(ua);
+            if (!pb) continue;
+            if (overlaps(*pa, *pb)) return true;
+        }
+    }
+    return false;
+}
+
+std::string resolve_tray_id(SarekEnv& env, const std::string& path) {
+    std::string current = path;
+    std::unordered_set<std::string> visited;
+    visited.insert(current);
+    for (;;) {
+        auto id_bytes = env.path().get(current);
+        if (!id_bytes)
+            throw std::runtime_error("resolve_tray_id: path '" + current + "' not found");
+        if (id_bytes->size() != 8)
+            throw std::runtime_error("resolve_tray_id: corrupted path entry");
+        uint64_t oid = decode_uint64(id_bytes->data());
+        auto meta_bytes = env.metadata().get(oid);
+        if (!meta_bytes)
+            throw std::runtime_error("resolve_tray_id: missing metadata for object " +
+                                     std::to_string(oid));
+        MetadataRecord m = unpack_metadata(*meta_bytes);
+        if (m.link_path.empty()) return m.tray_id;
+        if (visited.count(m.link_path))
+            throw std::runtime_error("resolve_tray_id: circular link at '" + m.link_path + "'");
+        if (visited.size() > static_cast<size_t>(kMaxLinkDepth))
+            throw std::runtime_error("resolve_tray_id: link chain too long (>8 hops)");
+        visited.insert(m.link_path);
+        current = m.link_path;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,6 +1175,7 @@ DeleteUserResult delete_user(SarekEnv& env, const std::string& username) {
         env.tray().del(t.uuid_bytes.data(), 16, txn.get());
         if (!t.alias.empty())
             env.tray_alias().del(t.alias, txn.get());
+        env.tray_assertions().del(t.uuid_bytes.data(), 16, txn.get());
     }
 
     env.user().del(username, txn.get());

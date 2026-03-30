@@ -81,6 +81,21 @@ static Tray tray_from_yaml_bytes(const std::vector<uint8_t>& bytes) {
     }
 }
 
+// Pack assertions as msgpack array of strings.
+// NOTE: We write directly to tray_assertions DB rather than calling
+// sarek::store_tray_assertions() to avoid a circular CMake dependency
+// (sarek_bootstrap -> sarek_vault -> sarek_auth -> sarek_bootstrap).
+// The msgpack format of pack_assertions AND the byte layout of
+// uuid_str_to_bytes must stay in sync with vault.cpp::{pack_assertions,uuid_to_bytes}.
+static std::vector<uint8_t> pack_assertions(const std::vector<std::string>& v) {
+    msgpack::sbuffer buf;
+    msgpack::packer<msgpack::sbuffer> pk(buf);
+    pk.pack_array(static_cast<uint32_t>(v.size()));
+    for (const auto& s : v) pk.pack(s);
+    return {reinterpret_cast<const uint8_t*>(buf.data()),
+            reinterpret_cast<const uint8_t*>(buf.data()) + buf.size()};
+}
+
 // Pack a tray DB record.
 //   enc  0 = plain YAML tray bytes
 //        1 = PWENC wire bytes
@@ -294,6 +309,13 @@ std::unique_ptr<SarekEnv> run_bootstrap(const SarekConfig& cfg,
 
     auto admin_bytes = pack_user_record(admin);
     env->user().put(cfg.admin_user, admin_bytes, txn.get());
+
+    // Tray assertions: both system trays get "/*" (full admin scope)
+    auto admin_ass = pack_assertions({"/*"});
+    env->tray_assertions().put(sys_id.data(), sys_id.size(),
+                               admin_ass.data(), admin_ass.size(), txn.get());
+    env->tray_assertions().put(tok_id.data(), tok_id.size(),
+                               admin_ass.data(), admin_ass.size(), txn.get());
 
     txn->commit();
 

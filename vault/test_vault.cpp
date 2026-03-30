@@ -389,6 +389,107 @@ static void test_store_and_list_trays() {
 }
 
 // ---------------------------------------------------------------------------
+static void test_tray_scope_allows() {
+    // /* matches any path
+    assert(sarek::tray_scope_allows({"/*"}, "/anything"));
+    assert(sarek::tray_scope_allows({"/*"}, "/a/b/c"));
+
+    // slc: prefix match
+    assert(sarek::tray_scope_allows({"slc:/alice/*"}, "/alice/secrets/x"));
+    assert(sarek::tray_scope_allows({"slc:/alice/*"}, "/alice/"));
+    assert(!sarek::tray_scope_allows({"slc:/alice/*"}, "/bob/secrets/x"));
+    assert(!sarek::tray_scope_allows({"slc:/alice/*"}, "/alicefoo/x"));
+
+    // slc: exact match (no trailing *)
+    assert(sarek::tray_scope_allows({"slc:/exact/path"}, "/exact/path"));
+    assert(!sarek::tray_scope_allows({"slc:/exact/path"}, "/exact/path/sub"));
+
+    // multiple assertions: any match succeeds
+    assert(sarek::tray_scope_allows({"slc:/alice/*", "slc:/team-a/*"}, "/team-a/shared"));
+    assert(!sarek::tray_scope_allows({"slc:/alice/*", "slc:/team-a/*"}, "/bob/secret"));
+
+    // empty assertions: always false
+    assert(!sarek::tray_scope_allows({}, "/anything"));
+
+    std::puts("tray_scope_allows: OK");
+}
+
+// ---------------------------------------------------------------------------
+static void test_tray_usable_by() {
+    // exact overlap: same prefix
+    assert(sarek::tray_usable_by({"slc:/alice/*"}, {"slc:/alice/*"}));
+
+    // user prefix narrower than tray prefix → still overlaps
+    assert(sarek::tray_usable_by({"slc:/alice/*"}, {"slc:/alice/secrets/*"}));
+
+    // tray prefix narrower than user prefix → overlaps
+    assert(sarek::tray_usable_by({"slc:/alice/secrets/*"}, {"slc:/alice/*"}));
+
+    // disjoint prefixes
+    assert(!sarek::tray_usable_by({"slc:/alice/*"}, {"slc:/bob/*"}));
+
+    // /* always overlaps
+    assert(sarek::tray_usable_by({"/*"}, {"slc:/anything/*"}));
+    assert(sarek::tray_usable_by({"slc:/alice/*"}, {"/*"}));
+
+    // empty on either side
+    assert(!sarek::tray_usable_by({}, {"slc:/alice/*"}));
+    assert(!sarek::tray_usable_by({"slc:/alice/*"}, {}));
+
+    // exact-path assertions: false positive guard
+    // tray slc:/a (exact) + user slc:/ab/* (prefix) must be false
+    assert(!sarek::tray_usable_by({"slc:/a"}, {"slc:/ab/*"}));
+    // tray slc:/alice/* + user slc:/alice/x (exact) must be true
+    assert(sarek::tray_usable_by({"slc:/alice/*"}, {"slc:/alice/x"}));
+
+    std::puts("tray_usable_by: OK");
+}
+
+// ---------------------------------------------------------------------------
+static void test_tray_assertions_roundtrip() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    // store_tray with assertions, then get_tray_assertions
+    std::vector<std::string> expected = {"slc:/alice/*", "slc:/team-a/*"};
+    Tray t = make_tray(TrayType::Level2, "alice-tray");
+    sarek::store_tray(*env, t, 1, expected);
+
+    auto got = sarek::get_tray_assertions(*env, t.id);
+    assert(got == expected);
+
+    // store_tray with empty assertions → returns empty vector
+    Tray t2 = make_tray(TrayType::Level2, "no-assert-tray");
+    sarek::store_tray(*env, t2, 1, {});
+    auto got2 = sarek::get_tray_assertions(*env, t2.id);
+    assert(got2.empty());
+
+    // store_tray_assertions standalone (overwrite)
+    auto txn = env->begin_txn();
+    sarek::store_tray_assertions(*env, t.id, {"/*"}, txn.get());
+    txn->commit();
+    auto got3 = sarek::get_tray_assertions(*env, t.id);
+    assert(got3 == std::vector<std::string>{"/*"});
+
+    // get_tray_assertions for unknown id returns empty
+    auto got4 = sarek::get_tray_assertions(*env, "00000000-0000-0000-0000-000000000000");
+    assert(got4.empty());
+
+    // bootstrap seeds system and system-token with ["/*"]
+    Tray sys = sarek::load_tray_by_alias(*env, "system");
+    auto sys_ass = sarek::get_tray_assertions(*env, sys.id);
+    assert(sys_ass == std::vector<std::string>{"/*"});
+
+    Tray tok = sarek::load_tray_by_alias(*env, "system-token");
+    auto tok_ass = sarek::get_tray_assertions(*env, tok.id);
+    assert(tok_ass == std::vector<std::string>{"/*"});
+
+    std::puts("tray_assertions roundtrip: OK");
+    fs::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
 static void test_read_secret_with_cache() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
@@ -598,6 +699,38 @@ static void test_etag_zero_skips_check() {
 }
 
 // ---------------------------------------------------------------------------
+static void test_delete_user_purges_assertions() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    // Create user alice (user_id 2) with a tray
+    sarek::UserRecord alice;
+    alice.user_id    = 2;
+    alice.pwhash     = sarek::hash_password("pw", 10);
+    alice.flags      = 0;
+    alice.assertions = {"usr:alice", "slc:/alice/*"};
+    auto ab = sarek::pack_user_record(alice);
+    env->user().put("alice", ab);
+
+    Tray t = make_tray(TrayType::Level2, "alice-tray");
+    sarek::store_tray(*env, t, 2, {"slc:/alice/*"});
+
+    // Assertions exist before delete
+    auto before = sarek::get_tray_assertions(*env, t.id);
+    assert(!before.empty());
+
+    sarek::delete_user(*env, "alice");
+
+    // Tray assertions must be gone after delete
+    auto after = sarek::get_tray_assertions(*env, t.id);
+    assert(after.empty());
+
+    std::puts("delete_user purges tray_assertions: OK");
+    fs::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
 int main() {
     std::srand(99999);
 
@@ -613,6 +746,10 @@ int main() {
     test_create_user();
     test_lock_user();
     test_store_and_list_trays();
+    test_tray_scope_allows();
+    test_tray_usable_by();
+    test_tray_assertions_roundtrip();
+    test_delete_user_purges_assertions();
     test_read_secret_with_cache();
     test_update_secret_basic();
     test_update_secret_cache_invalidated();

@@ -140,20 +140,7 @@ static bool is_admin(const TokenClaims& c) {
 
 // Does a slc: assertion or /* cover the given path?
 static bool scope_allows(const TokenClaims& c, const std::string& path) {
-    for (const auto& a : c.assertions) {
-        if (a == "/*") return true;
-        if (a.size() > 4 && a.substr(0, 4) == "slc:") {
-            std::string scope = a.substr(4);
-            if (!scope.empty() && scope.back() == '*') {
-                std::string pfx = scope.substr(0, scope.size() - 1);
-                if (path.size() >= pfx.size() && path.substr(0, pfx.size()) == pfx)
-                    return true;
-            } else {
-                if (path == scope) return true;
-            }
-        }
-    }
-    return false;
+    return sarek::tray_scope_allows(c.assertions, path);
 }
 
 // ---------------------------------------------------------------------------
@@ -598,7 +585,13 @@ static void register_routes(
             auto user_opt = load_user(env, claims->username);
             if (!user_opt) throw std::runtime_error("current user not found in DB");
 
-            store_tray(env, tray, user_opt->user_id);
+            // Derive tray assertions from the creator's token slc: claims.
+            std::vector<std::string> tray_ass;
+            for (const auto& a : claims->assertions) {
+                if (a == "/*" || (a.size() > 4 && a.substr(0, 4) == "slc:"))
+                    tray_ass.push_back(a);
+            }
+            store_tray(env, tray, user_opt->user_id, tray_ass);
 
             get_logger()->info("[cmd=keygen] user={} alias={} type={} addr={}",
                                claims->username, alias, type_s, req.remote_addr);
@@ -692,6 +685,27 @@ static void register_routes(
         }
     });
 
+    // ── GET /trays/:alias/usable  ────────────────────────────────────────────
+    // Returns {"usable":true/false} — whether the caller's token assertions
+    // have any path overlap with the tray's assertions.
+    // Registered before GET /trays/:alias to avoid regex shadowing.
+    svr.Get(R"(/trays/([^/]+)/usable)", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray, env);
+        if (!claims) return;
+        try {
+            std::string alias = req.matches[1].str();
+            Tray t = load_tray_by_alias(env, alias);
+            auto tray_ass = sarek::get_tray_assertions(env, t.id);
+            bool usable = sarek::tray_usable_by(tray_ass, claims->assertions);
+            get_logger()->info("[cmd=trayusable] user={} alias={} usable={} addr={}",
+                               claims->username, alias, usable, req.remote_addr);
+            res.set_content(json{{"usable", usable}}.dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 404;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
     // ── GET /trays/:alias ────────────────────────────────────────────────────
     svr.Get(R"(/trays/([^/]+))", [&](const httplib::Request& req, httplib::Response& res) {
         auto claims = try_auth(req, res, tok_tray, env);
@@ -708,14 +722,23 @@ static void register_routes(
                     res.status = 403;
                     res.set_content(jerr("access denied"), "application/json");
                 } else {
+                    std::vector<std::string> ass;
+                    auto id_bytes = env.tray_alias().get(alias);
+                    if (id_bytes && id_bytes->size() == 16) {
+                        std::string tray_id_str = fmt_uuid(id_bytes->data());
+                        ass = sarek::get_tray_assertions(env, tray_id_str);
+                    }
                     res.set_content(
-                        json{{"encrypted", true}, {"alias", alias}}.dump(),
+                        json{{"encrypted", true}, {"alias", alias}, {"assertions", ass}}.dump(),
                         "application/json");
                 }
                 return;
             }
             Tray t = load_tray_by_alias(env, alias);
-            res.set_content(tray_to_json(t).dump(), "application/json");
+            auto j = tray_to_json(t);
+            auto ass = sarek::get_tray_assertions(env, t.id);
+            j["assertions"] = ass;  // nlohmann/json handles vector<string> directly
+            res.set_content(j.dump(), "application/json");
         } catch (const std::exception& e) {
             res.status = 404;
             res.set_content(jerr(e.what()), "application/json");
@@ -1014,6 +1037,16 @@ static void register_routes(
             Tray tray = req.has_param("tray")
                 ? load_tray_by_alias(env, req.get_param_value("tray"))
                 : load_system_tray(env);
+            // Tray assertion check: tray must cover the requested path.
+            auto tray_ass = sarek::get_tray_assertions(env, tray.id);
+            if (!sarek::tray_scope_allows(tray_ass, path)) {
+                get_logger()->warn("[cmd=create] TRAY_DENIED user={} path={} tray={} addr={}",
+                                   claims->username, path, tray.id, req.remote_addr);
+                res.status = 403;
+                res.set_content(jerr("tray not authorized for this path"), "application/json");
+                clear_request_user();
+                return;
+            }
             std::string mimetype = req.get_header_value("Content-Type");
             if (mimetype.empty()) mimetype = "application/octet-stream";
 
@@ -1064,6 +1097,32 @@ static void register_routes(
                 res.set_content("{\"error\":\"invalid If-Match header\"}", "application/json");
                 return;
             }
+        }
+
+        // Tray assertion check for edit: resolve path to the encrypting tray and
+        // verify it's authorized for this path.
+        try {
+            std::string tray_id = sarek::resolve_tray_id(env, path);
+            auto tray_ass = sarek::get_tray_assertions(env, tray_id);
+            if (!sarek::tray_scope_allows(tray_ass, path)) {
+                get_logger()->warn("[cmd=edit] TRAY_DENIED user={} path={} tray={} addr={}",
+                                   claims->username, path, tray_id, req.remote_addr);
+                res.status = 403;
+                res.set_content(jerr("tray not authorized for this path"), "application/json");
+                return;
+            }
+        } catch (const std::runtime_error& e) {
+            std::string msg = e.what();
+            if (msg.find("not found") != std::string::npos) {
+                res.status = 404;
+                res.set_content(jerr(msg), "application/json");
+            } else {
+                get_logger()->error("[cmd=edit] resolve_tray_id error: {} path={} addr={}",
+                                    msg, path, req.remote_addr);
+                res.status = 500;
+                res.set_content(jerr("internal error resolving tray"), "application/json");
+            }
+            return;
         }
 
         set_request_user(claims->username);

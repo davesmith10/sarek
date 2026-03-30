@@ -108,12 +108,12 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// SarekEnv — BDB environment + all eight named databases
+// SarekEnv — BDB environment + all ten named databases
 // ---------------------------------------------------------------------------
 class SarekEnv {
 public:
     // Opens (and creates if necessary) the BDB environment at `path` and opens
-    // all eight named BTree databases within it.
+    // all ten named BTree databases within it.
     explicit SarekEnv(const std::string& path);
     ~SarekEnv();
     SarekEnv(const SarekEnv&) = delete;
@@ -131,6 +131,7 @@ public:
     SarekDb& manage_token()    { return manage_token_db_; }
     SarekDb& wrapped()         { return wrapped_db_; }
     SarekDb& wrapper_lookup()  { return wrapper_lookup_db_; }
+    SarekDb& tray_assertions() { return tray_assertions_db_; }
 
     // ── System tray keyring ──────────────────────────────────────────────────
     // Store the decrypted system tray as raw msgpack bytes in the kernel
@@ -155,6 +156,7 @@ private:
     SarekDb manage_token_db_;
     SarekDb wrapped_db_;
     SarekDb wrapper_lookup_db_;
+    SarekDb tray_assertions_db_;
 
     std::optional<KeyringBlob> system_tray_blob_;
 };
