@@ -658,6 +658,59 @@ bool tray_scope_allows(const std::vector<std::string>& assertions,
     return false;
 }
 
+bool scope_is_within(const std::string& req,
+                     const std::vector<std::string>& user_assertions) {
+    if (user_assertions.empty()) return false;
+
+    // Admin wildcard: only if caller is also admin.
+    if (req == "/*") {
+        for (const auto& a : user_assertions)
+            if (a == "/*") return true;
+        return false;
+    }
+
+    // All other valid scopes start with "slc:".
+    if (req.size() <= 4 || req.substr(0, 4) != "slc:")
+        return false;
+
+    const std::string scope = req.substr(4);   // e.g. "/alice/*" or "/alice/foo"
+
+    if (scope.empty() || scope[0] != '/')
+        return false;
+    if (scope.back() == '/')                    // trailing slash: invalid
+        return false;
+
+    if (scope.back() == '*') {
+        // Wildcard scope: must be ".../something/*" — the * must follow a /
+        if (scope.size() < 2 || scope[scope.size() - 2] != '/')
+            return false;                       // e.g. "/a*" — invalid
+
+        // prefix includes the trailing slash, e.g. "/alice/scripts/"
+        const std::string req_prefix = scope.substr(0, scope.size() - 1);
+
+        for (const auto& a : user_assertions) {
+            if (a == "/*") return true;
+            if (a.size() > 4 && a.substr(0, 4) == "slc:") {
+                const std::string user_scope = a.substr(4);
+                if (!user_scope.empty() && user_scope.back() == '*') {
+                    // user_prefix e.g. "/alice/"
+                    const std::string user_prefix =
+                        user_scope.substr(0, user_scope.size() - 1);
+                    // req_prefix must start with user_prefix
+                    if (req_prefix.size() >= user_prefix.size() &&
+                        req_prefix.substr(0, user_prefix.size()) == user_prefix)
+                        return true;
+                }
+                // An exact user scope cannot cover a wildcard request.
+            }
+        }
+        return false;
+    }
+
+    // Exact-path scope: reuse tray_scope_allows.
+    return tray_scope_allows(user_assertions, scope);
+}
+
 bool tray_usable_by(const std::vector<std::string>& tray_assertions,
                     const std::vector<std::string>& user_assertions) {
     struct Pattern {

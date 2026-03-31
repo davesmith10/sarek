@@ -132,6 +132,18 @@ std::vector<std::string> get_tray_assertions(SarekEnv& env,
 bool tray_scope_allows(const std::vector<std::string>& assertions,
                        const std::string& path);
 
+// Return true if `requested_scope` is syntactically valid AND describes a set
+// of paths that is a subset of what `user_assertions` already permits.
+//
+// `requested_scope` must be one of:
+//   "/*"              — only valid if user_assertions contains "/*"
+//   "slc:/prefix/*"   — wildcard; the /* must be preceded by /
+//   "slc:/exact/path" — exact path; must not end with /
+//
+// Returns false for any syntactically invalid input.
+bool scope_is_within(const std::string& requested_scope,
+                     const std::vector<std::string>& user_assertions);
+
 // Return true if the tray's assertions have any overlap with the user's
 // assertions -- i.e., there exists at least one path that both cover.
 // Used by the /usable endpoint to pre-validate mark-default.

@@ -1407,6 +1407,123 @@ static void register_routes(
         }
     });
 
+    // ── POST /bearer-token ───────────────────────────────────────────────────
+    // Issues a long-lived, scoped, bot-tagged token for scripting use.
+    //
+    // Request body (JSON):
+    //   { "ttl": <seconds>,            -- optional, default 86400, range 600-31536000
+    //     "assertions": ["slc:/x/*"]   -- optional; defaults to caller's slc: assertions
+    //   }
+    //
+    // Response 200:
+    //   { "token": "<base64-encoded wire bytes>" }
+    //
+    // 400  bad input (TTL out of range, etc.)
+    // 403  requested assertion not within caller's scope
+    // ---------------------------------------------------------------------------
+    svr.Post("/bearer-token", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray, env);
+        if (!claims) return;
+        set_request_user(claims->username);
+
+        auto log = get_logger();
+
+        int64_t ttl_secs = 86400;
+        std::vector<std::string> requested_assertions;
+        bool assertions_provided = false;
+
+        try {
+            if (!req.body.empty()) {
+                auto body = json::parse(req.body);
+                if (body.contains("ttl"))
+                    ttl_secs = body.at("ttl").get<int64_t>();
+                if (body.contains("assertions")) {
+                    for (const auto& a : body.at("assertions"))
+                        requested_assertions.push_back(a.get<std::string>());
+                    assertions_provided = true;
+                }
+            }
+        } catch (const std::exception& ex) {
+            res.status = 400;
+            res.set_content(jerr(std::string("bad request body: ") + ex.what()),
+                            "application/json");
+            clear_request_user();
+            return;
+        }
+
+        // TTL bounds: 10 minutes to 1 year
+        if (ttl_secs < 600 || ttl_secs > 31536000) {
+            res.status = 400;
+            res.set_content(jerr("ttl must be between 600 and 31536000 seconds"),
+                            "application/json");
+            clear_request_user();
+            return;
+        }
+
+        // Determine effective scope assertions.
+        // If caller didn't provide any, default to their own slc: and /* assertions.
+        std::vector<std::string> effective_assertions;
+        if (!assertions_provided) {
+            for (const auto& a : claims->assertions)
+                if (a == "/*" || (a.size() > 4 && a.substr(0, 4) == "slc:"))
+                    effective_assertions.push_back(a);
+        } else {
+            // Validate each requested assertion against caller's scope.
+            for (const auto& a : requested_assertions) {
+                if (!sarek::scope_is_within(a, claims->assertions)) {
+                    log->warn("[cmd=bearer-token] ACCESS_DENIED user={} scope={} addr={}",
+                              claims->username, a, req.remote_addr);
+                    res.status = 403;
+                    res.set_content(jerr("Access Denied: scope '" + a +
+                                         "' is not within your permissions"),
+                                    "application/json");
+                    clear_request_user();
+                    return;
+                }
+                effective_assertions.push_back(a);
+            }
+        }
+
+        // Build a synthetic UserRecord for token issuance.
+        // issue_token() reads user.assertions to populate the token data field.
+        UserRecord bot_user;
+        bot_user.user_id = 0;
+        bot_user.pwhash  = "none";
+        bot_user.flags   = 0;
+        bot_user.assertions.push_back("usr:" + claims->username);
+        bot_user.assertions.push_back("bot:true");
+        for (const auto& a : effective_assertions)
+            bot_user.assertions.push_back(a);
+
+        std::vector<uint8_t> wire;
+        try {
+            wire = issue_token(bot_user, tok_tray, ttl_secs);
+        } catch (const std::exception& ex) {
+            log->error("[cmd=bearer-token] issue_token failed: {}", ex.what());
+            res.status = 500;
+            res.set_content(jerr("token issuance failed"), "application/json");
+            clear_request_user();
+            return;
+        }
+
+        // Register in manage_token DB so it appears in list-tokens and can be revoked.
+        try {
+            Token tok = token_unpack(wire);
+            std::string tid = fmt_uuid(tok.token_uuid);
+            register_token(env, tid, claims->username, tok.issued_at, tok.expires_at);
+            log->info("[cmd=bearer-token] issued token_id={} user={} ttl={} scopes={} addr={}",
+                      tid, claims->username, ttl_secs, effective_assertions.size(),
+                      req.remote_addr);
+        } catch (const std::exception& ex) {
+            log->error("[cmd=bearer-token] register_token failed: {}", ex.what());
+            // Non-fatal: token still works, just won't appear in list-tokens.
+        }
+
+        std::string b64 = base64_encode(wire.data(), wire.size());
+        res.set_content(json{{"token", b64}}.dump(), "application/json");
+        clear_request_user();
+    });
+
     // ── GET /wrapped/:token — redeem a wrapping token (unauthenticated) ───────
     svr.Get(R"(/wrapped/([A-Za-z0-9_\-]+))", [&](const httplib::Request& req, httplib::Response& res) {
         auto log = get_logger();

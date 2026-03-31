@@ -415,6 +415,57 @@ static void test_tray_scope_allows() {
 }
 
 // ---------------------------------------------------------------------------
+static void test_scope_is_within() {
+    using sarek::scope_is_within;
+
+    // --- admin wildcard ---
+    // only an admin-scoped caller may request /*
+    assert( scope_is_within("/*",           {"/*"}));
+    assert(!scope_is_within("/*",           {"slc:/alice/*"}));
+
+    // --- wildcard scope: /prefix/* ---
+    // same scope as user
+    assert( scope_is_within("slc:/alice/*", {"slc:/alice/*"}));
+    // narrower prefix: /alice/scripts/* is within /alice/*
+    assert( scope_is_within("slc:/alice/scripts/*", {"slc:/alice/*"}));
+    // admin user may request anything
+    assert( scope_is_within("slc:/alice/*", {"/*"}));
+    // different stem: rejected
+    assert(!scope_is_within("slc:/bob/*",   {"slc:/alice/*"}));
+    // spec's exact multi-component example
+    assert(!scope_is_within("slc:/bob/secret-stuff/*", {"slc:/alice/*"}));
+    // partial stem match (not a path boundary): rejected
+    assert(!scope_is_within("slc:/alicefoo/*", {"slc:/alice/*"}));
+    // wildcard not preceded by /: invalid syntax
+    assert(!scope_is_within("slc:/a*",      {"slc:/alice/*"}));
+    // bare form (no slc: prefix) also rejected
+    assert(!scope_is_within("/a*",          {"slc:/alice/*"}));
+    // trailing slash: invalid syntax
+    assert(!scope_is_within("slc:/alice/",  {"slc:/alice/*"}));
+    // bare form (no slc: prefix) also rejected
+    assert(!scope_is_within("/alice/",      {"slc:/alice/*"}));
+    // missing slc: prefix
+    assert(!scope_is_within("/alice/*",     {"slc:/alice/*"}));
+
+    // --- exact-path scope ---
+    // exact path within user's wildcard
+    assert( scope_is_within("slc:/alice/myscripts/v1", {"slc:/alice/*"}));
+    // exact path outside user's scope
+    assert(!scope_is_within("slc:/bob/secret",         {"slc:/alice/*"}));
+    // exact path allowed by admin
+    assert( scope_is_within("slc:/anything/here",      {"/*"}));
+
+    // --- multiple user assertions ---
+    assert( scope_is_within("slc:/team-a/ci/*", {"slc:/alice/*", "slc:/team-a/*"}));
+    assert(!scope_is_within("slc:/ops/*",        {"slc:/alice/*", "slc:/team-a/*"}));
+
+    // --- empty user assertions: always false ---
+    assert(!scope_is_within("slc:/alice/*", {}));
+
+    std::puts("scope_is_within: OK");
+}
+
+// ---------------------------------------------------------------------------
 static void test_tray_usable_by() {
     // exact overlap: same prefix
     assert(sarek::tray_usable_by({"slc:/alice/*"}, {"slc:/alice/*"}));
@@ -747,6 +798,7 @@ int main() {
     test_lock_user();
     test_store_and_list_trays();
     test_tray_scope_allows();
+    test_scope_is_within();
     test_tray_usable_by();
     test_tray_assertions_roundtrip();
     test_delete_user_purges_assertions();
