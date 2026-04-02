@@ -88,20 +88,10 @@ static std::string jok(const std::string& msg = "ok") {
 // Auth helpers
 // ---------------------------------------------------------------------------
 
-// Extract raw token bytes from "Authorization: Bearer <base64>" header.
-static std::vector<uint8_t> extract_bearer(const httplib::Request& req) {
-    auto it = req.headers.find("Authorization");
-    if (it == req.headers.end())
-        throw std::runtime_error("Missing Authorization header");
-    const std::string& hdr = it->second;
-    if (hdr.size() < 7 || hdr.substr(0, 7) != "Bearer ")
-        throw std::runtime_error("Authorization must be 'Bearer <token>'");
-    return base64_decode(hdr.substr(7));
-}
-
 // Validate Bearer token; handles both bespoke (raw bytes) and OAuth JWT formats.
-// OAuth JWTs are detected by the base64-decoded bearer starting with 'e','y','J'
-// (the compact JWT header {"alg":"HS256",...} base64url-encodes to "eyJ...").
+// JWT compact form is three dot-separated base64url segments; the header segment
+// always base64url-encodes to "eyJ..." so we can detect it from the raw bearer
+// value without any decoding — no round-trip needed.
 // On failure, sets res to 401 and returns nullopt.
 static std::optional<TokenClaims> try_auth(
         const httplib::Request& req, httplib::Response& res,
@@ -109,19 +99,28 @@ static std::optional<TokenClaims> try_auth(
         SarekEnv& env,
         const std::vector<uint8_t>& oauth_key = {}) {
     try {
-        auto wire = extract_bearer(req);
+        // Extract raw bearer string from Authorization header.
+        auto it = req.headers.find("Authorization");
+        if (it == req.headers.end())
+            throw std::runtime_error("Missing Authorization header");
+        const std::string& hdr = it->second;
+        if (hdr.size() < 7 || hdr.substr(0, 7) != "Bearer ")
+            throw std::runtime_error("Authorization must be 'Bearer <token>'");
+        const std::string bearer = hdr.substr(7);
 
-        // Detect OAuth JWT: base64-decoded bearer starts with "eyJ"
-        if (wire.size() >= 3 &&
-            wire[0] == 'e' && wire[1] == 'y' && wire[2] == 'J')
+        // Detect OAuth JWT: raw bearer starts with "eyJ" (base64url-encoded '{"')
+        // and contains dots (segment separators). Pass directly — no decode needed.
+        if (bearer.size() >= 3 &&
+            bearer[0] == 'e' && bearer[1] == 'y' && bearer[2] == 'J' &&
+            bearer.find('.') != std::string::npos)
         {
             if (oauth_key.empty())
                 throw std::runtime_error("OAuth JWT received but server not configured");
-            std::string jwt_str(wire.begin(), wire.end());
-            return oauth_verify_jwt(oauth_key, jwt_str);
+            return oauth_verify_jwt(oauth_key, bearer);
         }
 
-        // Bespoke token path (existing behaviour)
+        // Bespoke token path: base64-decode and validate.
+        auto wire = base64_decode(bearer);
         auto claims = validate_token(wire, tok_tray);
 
         auto status = check_token(env, claims.token_uuid);
@@ -1574,8 +1573,12 @@ static void register_routes(
                 grant_type    = body.value("grant_type",    "");
                 client_id     = body.value("client_id",     "");
                 client_secret = body.value("client_secret", "");
-                if (body.contains("ttl"))
-                    ttl_secs = parse_ttl(body["ttl"].get<std::string>());
+                if (body.contains("ttl")) {
+                    if (body["ttl"].is_number_integer())
+                        ttl_secs = body["ttl"].get<int64_t>();
+                    else if (body["ttl"].is_string())
+                        ttl_secs = parse_ttl(body["ttl"].get<std::string>());
+                }
             } else {
                 // application/x-www-form-urlencoded (httplib parses into req.params)
                 auto get_param = [&](const std::string& key) -> std::string {
@@ -1587,6 +1590,15 @@ static void register_routes(
                 client_secret = get_param("client_secret");
                 std::string ttl_str = get_param("ttl");
                 if (!ttl_str.empty()) ttl_secs = parse_ttl(ttl_str);
+            }
+
+            if (ttl_secs <= 0) {
+                res.status = 400;
+                res.set_content(
+                    json{{"error","invalid_request"},
+                         {"error_description","ttl must be a positive number of seconds"}}.dump(),
+                    "application/json");
+                return;
             }
 
             if (grant_type != "client_credentials") {
@@ -1606,7 +1618,19 @@ static void register_routes(
                 return;
             }
 
-            std::string username = oauth_authenticate_client(env, client_id, client_secret);
+            // Auth failure → 401; use inner try so server errors below get 500.
+            std::string username;
+            try {
+                username = oauth_authenticate_client(env, client_id, client_secret);
+            } catch (const std::exception& auth_e) {
+                log->warn("[cmd=oauth/token] auth_failed addr={}", req.remote_addr);
+                res.status = 401;
+                res.set_content(
+                    json{{"error","invalid_client"},
+                         {"error_description","invalid client credentials"}}.dump(),
+                    "application/json");
+                return;
+            }
 
             auto user_opt = load_user(env, username);
             if (!user_opt) {
@@ -1623,18 +1647,22 @@ static void register_routes(
 
             log->info("[cmd=oauth/token] user={} addr={}", username, req.remote_addr);
 
+            // RFC 6749 §5.1: token responses must not be cached.
+            res.set_header("Cache-Control", "no-store");
+            res.set_header("Pragma", "no-cache");
             res.set_content(
                 json{{"access_token", jwt},
                      {"token_type",   "Bearer"},
                      {"expires_in",   ttl_secs}}.dump(),
                 "application/json");
+        } catch (const json::parse_error& e) {
+            log->warn("[cmd=oauth/token] bad_body={} addr={}", e.what(), req.remote_addr);
+            res.status = 400;
+            res.set_content(jerr("malformed request body"), "application/json");
         } catch (const std::exception& e) {
-            log->warn("[cmd=oauth/token] error={} addr={}", e.what(), req.remote_addr);
-            res.status = 401;
-            res.set_content(
-                json{{"error","invalid_client"},
-                     {"error_description","invalid client credentials"}}.dump(),
-                "application/json");
+            log->error("[cmd=oauth/token] server_error={} addr={}", e.what(), req.remote_addr);
+            res.status = 500;
+            res.set_content(jerr("internal server error"), "application/json");
         }
     });
 
