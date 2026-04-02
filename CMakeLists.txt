@@ -192,6 +192,19 @@ target_link_libraries(sarek_oauth PUBLIC
 )
 target_compile_options(sarek_oauth PRIVATE -Wall -Wextra)
 
+add_executable(sarek_oauth_test
+    oauth/test_oauth.cpp
+)
+target_include_directories(sarek_oauth_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${MSGPACK_INC}
+    ${OAUTH2_INC}
+    ${SCRYPT_KDF_INC}
+    ${XKCP_INC}
+)
+target_link_libraries(sarek_oauth_test PRIVATE sarek_oauth sarek_vault Threads::Threads)
+target_compile_options(sarek_oauth_test PRIVATE -Wall -Wextra)
+
 # ── Module 6: vault ───────────────────────────────────────────────────────────
 add_library(sarek_vault STATIC
     vault/vault.cpp
