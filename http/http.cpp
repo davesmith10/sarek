@@ -4,6 +4,7 @@
 #include "auth/auth.hpp"
 #include "bootstrap/user_record.hpp"
 #include "log/log.hpp"
+#include "oauth/oauth.hpp"
 
 #include <crystals/crystals.hpp>
 
@@ -1554,6 +1555,10 @@ void run_server(SarekEnv&          env,
                 const std::string& key_path) {
     // Load system-token tray (unencrypted Level2, used to validate Bearer tokens)
     Tray tok_tray = load_tray_by_alias(env, "system-token");
+
+    // Initialize OAuth signing key on first run (idempotent)
+    oauth_init_signing_key(env);
+    std::vector<uint8_t> oauth_signing_key = oauth_load_signing_key(env);
 
     // Shared data cache
     LruCache<uint64_t, std::vector<uint8_t>> data_cache(1024, cfg.cache_ttl_secs);
