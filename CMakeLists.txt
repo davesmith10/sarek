@@ -24,6 +24,13 @@ find_path(FYAML_INC libfyaml.h REQUIRED HINTS /usr/local/include)
 find_library(JSON_C_LIB json-c REQUIRED HINTS /usr/local/lib64 /usr/local/lib /usr/lib64 /usr/lib)
 find_path(JSON_C_INC json-c/json.h REQUIRED HINTS /usr/local/include /usr/include)
 
+find_library(OAUTH2_LIB  oauth2   REQUIRED HINTS /usr/local/lib)
+find_library(CJOSE_LIB   cjose    REQUIRED HINTS /usr/lib64 /usr/local/lib)
+find_library(JANSSON_LIB jansson  REQUIRED HINTS /usr/lib64 /usr/local/lib)
+find_library(CURL_LIB    curl     REQUIRED HINTS /usr/lib64 /usr/local/lib)
+find_path(OAUTH2_INC oauth2/oauth2.h REQUIRED HINTS /usr/local/include)
+# cjose and jansson headers are in the default include paths (/usr/include)
+
 # libcrystals (installed) + its transitive dynamic deps
 # Override CRYSTALS_LIB and CRYSTALS_INC via -D flags to use a dev build, e.g.:
 #   cmake -S sarek -B sarek/build \
@@ -162,6 +169,29 @@ add_executable(sarek_auth_test
 target_link_libraries(sarek_auth_test PRIVATE sarek_auth Threads::Threads)
 target_compile_options(sarek_auth_test PRIVATE -Wall -Wextra)
 
+# ── Module 5b: oauth ──────────────────────────────────────────────────────────
+add_library(sarek_oauth STATIC
+    oauth/oauth.cpp
+)
+target_include_directories(sarek_oauth PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CRYSTALS_INC}
+)
+target_include_directories(sarek_oauth PRIVATE
+    ${MSGPACK_INC}
+    ${OAUTH2_INC}
+)
+target_link_libraries(sarek_oauth PUBLIC
+    sarek_auth
+    sarek_log
+    ${OAUTH2_LIB}
+    ${CJOSE_LIB}
+    ${JANSSON_LIB}
+    ${CURL_LIB}
+    OpenSSL::Crypto
+)
+target_compile_options(sarek_oauth PRIVATE -Wall -Wextra)
+
 # ── Module 6: vault ───────────────────────────────────────────────────────────
 add_library(sarek_vault STATIC
     vault/vault.cpp
@@ -202,6 +232,7 @@ target_include_directories(sarek_http PUBLIC
 target_include_directories(sarek_http PRIVATE ${FYAML_INC} ${JSON_C_INC})
 target_link_libraries(sarek_http PUBLIC
     sarek_vault
+    sarek_oauth
     sarek_log
     OpenSSL::SSL
     ${FYAML_LIB}
