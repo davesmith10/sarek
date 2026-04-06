@@ -25,11 +25,11 @@ struct OAuthClientRecord {
 
 // Generate a fresh 32-byte HMAC signing key and store it in oauth_client DB.
 // No-op if a key already exists (idempotent — safe to call on every startup).
-void oauth_init_signing_key(SarekEnv& env);
+void oauth_init_signing_key(SarekEnv& env, const Tray& system_tray);
 
 // Load the HMAC signing key from oauth_client DB.
 // Throws std::runtime_error if not found (bootstrap not run).
-std::vector<uint8_t> oauth_load_signing_key(SarekEnv& env);
+std::vector<uint8_t> oauth_load_signing_key(SarekEnv& env, const Tray& system_tray);
 
 // ---------------------------------------------------------------------------
 // Client credential CRUD

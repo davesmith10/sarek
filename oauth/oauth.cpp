@@ -1,6 +1,7 @@
 #include "oauth/oauth.hpp"
 #include "bootstrap/bootstrap.hpp"   // hash_password, verify_password
 #include "auth/auth.hpp"             // load_user, TokenClaims
+#include "vault/vault.hpp"           // obiwan_encrypt, obiwan_decrypt
 #include "log/log.hpp"
 
 extern "C" {
@@ -39,23 +40,37 @@ static oauth2_log_t* get_oauth2_log() {
 
 static const std::string kSigningKeyEntry{"__signing_key__"};
 
-void oauth_init_signing_key(SarekEnv& env) {
-    if (env.oauth_client().get(kSigningKeyEntry))
-        return;   // already present — idempotent
+void oauth_init_signing_key(SarekEnv& env, const Tray& system_tray) {
+    auto existing = env.oauth_client().get(kSigningKeyEntry);
+    if (existing) {
+        // Check for OBIWAN magic prefix to distinguish encrypted from plaintext.
+        static const uint8_t kObiwan[] = {'O','B','I','W','A','N','0','1'};
+        const bool looks_encrypted = existing->size() >= 8 &&
+            std::memcmp(existing->data(), kObiwan, 8) == 0;
+        if (looks_encrypted) {
+            obiwan_decrypt(*existing, system_tray);  // throws on real crypto failure
+            return;  // already encrypted — idempotent
+        }
+        // Stored bytes do not start with OBIWAN magic — legacy plaintext key.
+        env.oauth_client().del(kSigningKeyEntry);
+        get_logger()->warn("oauth.signing_key: replaced plaintext key (JWTs invalidated)");
+    }
 
     std::vector<uint8_t> key(32);
     if (RAND_bytes(key.data(), 32) != 1)
         throw std::runtime_error("oauth_init_signing_key: RAND_bytes failed");
 
-    env.oauth_client().put(kSigningKeyEntry, key);
+    auto ciphertext = obiwan_encrypt(key, system_tray);
+    OPENSSL_cleanse(key.data(), key.size());
+    env.oauth_client().put(kSigningKeyEntry, ciphertext);
     get_logger()->info("oauth.signing_key: generated");
 }
 
-std::vector<uint8_t> oauth_load_signing_key(SarekEnv& env) {
+std::vector<uint8_t> oauth_load_signing_key(SarekEnv& env, const Tray& system_tray) {
     auto val = env.oauth_client().get(kSigningKeyEntry);
     if (!val)
         throw std::runtime_error("OAuth signing key not found; run bootstrap first");
-    return *val;
+    return obiwan_decrypt(*val, system_tray);
 }
 
 // ---------------------------------------------------------------------------
