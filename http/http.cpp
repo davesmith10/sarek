@@ -17,6 +17,7 @@
 
 #include <openssl/ssl.h>
 #include <openssl/rand.h>
+#include <openssl/crypto.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -97,7 +98,7 @@ static std::optional<TokenClaims> try_auth(
         const httplib::Request& req, httplib::Response& res,
         const Tray& tok_tray,
         SarekEnv& env,
-        const std::vector<uint8_t>& oauth_key = {}) {
+        const KeyringBlob& oauth_key) {
     try {
         // Extract raw bearer string from Authorization header.
         auto it = req.headers.find("Authorization");
@@ -114,9 +115,7 @@ static std::optional<TokenClaims> try_auth(
             bearer[0] == 'e' && bearer[1] == 'y' && bearer[2] == 'J' &&
             bearer.find('.') != std::string::npos)
         {
-            if (oauth_key.empty())
-                throw std::runtime_error("OAuth JWT received but server not configured");
-            return oauth_verify_jwt(oauth_key, bearer);
+            return oauth_verify_jwt(oauth_key.load(), bearer);
         }
 
         // Bespoke token path: base64-decode and validate.
@@ -274,7 +273,7 @@ static void register_routes(
         const SarekConfig& cfg,
         const Tray& tok_tray,
         LruCache<uint64_t, std::vector<uint8_t>>& data_cache,
-        const std::vector<uint8_t>& oauth_signing_key) {
+        const KeyringBlob& oauth_signing_key) {
 
     (void)cfg; // reserved for future rate-limit / policy use
 
@@ -1560,12 +1559,13 @@ static void register_routes(
     // ── POST /oauth/token (Client Credentials Flow) ──────────────────────────
     // Body: application/x-www-form-urlencoded or JSON
     //   grant_type=client_credentials&client_id=<id>&client_secret=<secret>
+    //   ttl=<n>s|m|h|d  -- optional, default 86400s, max 31556952s (1 year)
     // Response: {"access_token":"<jwt>","token_type":"Bearer","expires_in":<secs>}
     svr.Post("/oauth/token", [&](const httplib::Request& req, httplib::Response& res) {
         auto log = get_logger();
         try {
             std::string grant_type, client_id, client_secret;
-            int64_t ttl_secs = 3600;
+            int64_t ttl_secs = 86400;
 
             const std::string& ct = req.get_header_value("Content-Type");
             if (ct.find("application/json") != std::string::npos) {
@@ -1597,6 +1597,14 @@ static void register_routes(
                 res.set_content(
                     json{{"error","invalid_request"},
                          {"error_description","ttl must be a positive number of seconds"}}.dump(),
+                    "application/json");
+                return;
+            }
+            if (ttl_secs > 31556952) {
+                res.status = 400;
+                res.set_content(
+                    json{{"error","invalid_request"},
+                         {"error_description","ttl may not exceed 31556952 seconds (1 year)"}}.dump(),
                     "application/json");
                 return;
             }
@@ -1643,7 +1651,7 @@ static void register_routes(
             }
 
             std::string jwt = oauth_issue_jwt(
-                oauth_signing_key, username, user_opt->assertions, ttl_secs);
+                oauth_signing_key.load(), username, user_opt->assertions, ttl_secs);
 
             log->info("[cmd=oauth/token] user={} addr={}", username, req.remote_addr);
 
@@ -1732,85 +1740,96 @@ void run_server(SarekEnv&          env,
     // Load system-token tray (unencrypted Level2, used to validate Bearer tokens)
     Tray tok_tray = load_tray_by_alias(env, "system-token");
 
-    // Initialize OAuth signing key on first run (idempotent)
-    oauth_init_signing_key(env);
-    std::vector<uint8_t> oauth_signing_key = oauth_load_signing_key(env);
-
-    // Shared data cache
-    LruCache<uint64_t, std::vector<uint8_t>> data_cache(1024, cfg.cache_ttl_secs);
-
-    // Background cleanup thread: purge expired tokens every hour
-    g_cleanup_stop = false;
-    std::thread cleanup_thread([&env]() {
-        while (!g_cleanup_stop) {
-            std::unique_lock<std::mutex> lk(g_cleanup_mu);
-            g_cleanup_cv.wait_for(lk, std::chrono::hours(1),
-                                  []{ return g_cleanup_stop.load(); });
-            if (g_cleanup_stop) break;
-            try {
-                int n = purge_expired_tokens(env);
-                get_logger()->info("token.purge_expired: background count={}", n);
-            } catch (const std::exception& e) {
-                get_logger()->error("token.purge_expired: error={}", e.what());
-            }
-            try {
-                int n = purge_expired_wrapped(env);
-                if (n > 0)
-                    get_logger()->info("wrap.purge_expired: background count={}", n);
-            } catch (const std::exception& e) {
-                get_logger()->error("wrap.purge_expired: error={}", e.what());
-            }
-        }
-    });
-
-    if (!cert_path.empty() && !key_path.empty()) {
-        // HTTPS path: capture by value for the setup callback
-        std::string cp = cert_path;
-        std::string kp = key_path;
-
-        httplib::SSLServer svr(
-            [cp, kp](httplib::tls::ctx_t raw_ctx) -> bool {
-                SSL_CTX* ctx = static_cast<SSL_CTX*>(raw_ctx);
-                if (SSL_CTX_use_certificate_file(ctx, cp.c_str(), SSL_FILETYPE_PEM) != 1)
-                    return false;
-                if (SSL_CTX_use_PrivateKey_file(ctx, kp.c_str(), SSL_FILETYPE_PEM) != 1)
-                    return false;
-                // Prefer post-quantum hybrid KEM group; fall back to X25519 on older OpenSSL
-                SSL_CTX_set1_groups_list(ctx, "X25519MLKEM768:X25519");
-                return true;
-            });
-
-        svr.set_trusted_proxies(cfg.trusted_proxies);
-        register_routes(svr, env, cfg, tok_tray, data_cache, oauth_signing_key);
-        g_active_svr.store(&svr, std::memory_order_release);
-        if (!svr.bind_to_port("0.0.0.0", cfg.http_port))
-            throw std::runtime_error("failed to bind to port " + std::to_string(cfg.http_port));
-        get_logger()->info("server started successfully on port {} (HTTPS)", cfg.http_port);
-        svr.listen_after_bind();
-        g_active_svr.store(nullptr, std::memory_order_release);
-        get_logger()->info("signal received — shutting down");
-    } else {
-        // Plain HTTP (development / test only)
-        httplib::Server svr;
-        svr.set_trusted_proxies(cfg.trusted_proxies);
-        register_routes(svr, env, cfg, tok_tray, data_cache, oauth_signing_key);
-        g_active_svr.store(&svr, std::memory_order_release);
-        if (!svr.bind_to_port("0.0.0.0", cfg.http_port))
-            throw std::runtime_error("failed to bind to port " + std::to_string(cfg.http_port));
-        get_logger()->info("server started successfully on port {} (HTTP)", cfg.http_port);
-        svr.listen_after_bind();
-        g_active_svr.store(nullptr, std::memory_order_release);
-        get_logger()->info("signal received — shutting down");
-    }
-
-    // Stop and join background cleanup thread
+    // Initialize and load OAuth signing key; move plaintext into kernel keyring.
+    Tray sys_tray = load_system_tray(env);
+    oauth_init_signing_key(env, sys_tray);
     {
-        std::lock_guard<std::mutex> lk(g_cleanup_mu);
-        g_cleanup_stop = true;
-    }
-    g_cleanup_cv.notify_all();
-    if (cleanup_thread.joinable())
-        cleanup_thread.join();
+        auto raw_key = oauth_load_signing_key(env, sys_tray);
+        KeyringBlob oauth_signing_key = KeyringBlob::store(
+            "sarek:oauth-signing-key", raw_key.data(), raw_key.size());
+        OPENSSL_cleanse(raw_key.data(), raw_key.size());
+
+        // Shared data cache
+        LruCache<uint64_t, std::vector<uint8_t>> data_cache(1024, cfg.cache_ttl_secs);
+
+        // Background cleanup thread: purge expired tokens every hour
+        g_cleanup_stop = false;
+        std::thread cleanup_thread([&env]() {
+            while (!g_cleanup_stop) {
+                std::unique_lock<std::mutex> lk(g_cleanup_mu);
+                g_cleanup_cv.wait_for(lk, std::chrono::hours(1),
+                                      []{ return g_cleanup_stop.load(); });
+                if (g_cleanup_stop) break;
+                try {
+                    int n = purge_expired_tokens(env);
+                    get_logger()->info("token.purge_expired: background count={}", n);
+                } catch (const std::exception& e) {
+                    get_logger()->error("token.purge_expired: error={}", e.what());
+                }
+                try {
+                    int n = purge_expired_wrapped(env);
+                    if (n > 0)
+                        get_logger()->info("wrap.purge_expired: background count={}", n);
+                } catch (const std::exception& e) {
+                    get_logger()->error("wrap.purge_expired: error={}", e.what());
+                }
+            }
+        });
+        struct JoinOnExit {
+            std::thread& t;
+            ~JoinOnExit() { if (t.joinable()) t.join(); }
+        };
+        JoinOnExit thread_guard{cleanup_thread};
+
+        if (!cert_path.empty() && !key_path.empty()) {
+            // HTTPS path: capture by value for the setup callback
+            std::string cp = cert_path;
+            std::string kp = key_path;
+
+            httplib::SSLServer svr(
+                [cp, kp](httplib::tls::ctx_t raw_ctx) -> bool {
+                    SSL_CTX* ctx = static_cast<SSL_CTX*>(raw_ctx);
+                    if (SSL_CTX_use_certificate_file(ctx, cp.c_str(), SSL_FILETYPE_PEM) != 1)
+                        return false;
+                    if (SSL_CTX_use_PrivateKey_file(ctx, kp.c_str(), SSL_FILETYPE_PEM) != 1)
+                        return false;
+                    // Prefer post-quantum hybrid KEM group; fall back to X25519 on older OpenSSL
+                    SSL_CTX_set1_groups_list(ctx, "X25519MLKEM768:X25519");
+                    return true;
+                });
+
+            svr.set_trusted_proxies(cfg.trusted_proxies);
+            register_routes(svr, env, cfg, tok_tray, data_cache, oauth_signing_key);
+            g_active_svr.store(&svr, std::memory_order_release);
+            if (!svr.bind_to_port("0.0.0.0", cfg.http_port))
+                throw std::runtime_error("failed to bind to port " + std::to_string(cfg.http_port));
+            get_logger()->info("server started successfully on port {} (HTTPS)", cfg.http_port);
+            svr.listen_after_bind();
+            g_active_svr.store(nullptr, std::memory_order_release);
+            get_logger()->info("signal received — shutting down");
+        } else {
+            // Plain HTTP (development / test only)
+            httplib::Server svr;
+            svr.set_trusted_proxies(cfg.trusted_proxies);
+            register_routes(svr, env, cfg, tok_tray, data_cache, oauth_signing_key);
+            g_active_svr.store(&svr, std::memory_order_release);
+            if (!svr.bind_to_port("0.0.0.0", cfg.http_port))
+                throw std::runtime_error("failed to bind to port " + std::to_string(cfg.http_port));
+            get_logger()->info("server started successfully on port {} (HTTP)", cfg.http_port);
+            svr.listen_after_bind();
+            g_active_svr.store(nullptr, std::memory_order_release);
+            get_logger()->info("signal received — shutting down");
+        }
+
+        // Stop and join background cleanup thread
+        {
+            std::lock_guard<std::mutex> lk(g_cleanup_mu);
+            g_cleanup_stop = true;
+        }
+        g_cleanup_cv.notify_all();
+        if (cleanup_thread.joinable())
+            cleanup_thread.join();
+    } // end KeyringBlob scope — destructor revokes kernel key on shutdown
 }
 
 } // namespace sarek
