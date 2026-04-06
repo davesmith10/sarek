@@ -12,7 +12,7 @@ own Authorization Server — no external IdP is involved.
 Admin                      Server                        Service / Script
   │                          │                                │
   │  oauth-setup --username  │                                │
-  ├─────────────────────────►│  store hashed secret in DB    │
+  ├─────────────────────────►│  store hashed secret in DB     │
   │  ← client_id + secret    │                                │
   │                          │                                │
   │                          │  POST /oauth/token             │
@@ -232,7 +232,7 @@ The OAuth token takes precedence over any bespoke token (`~/.sarek`) when both a
 ```
 $ amanda login-oauth
 Enter client secret:
-Logged in via OAuth (expires in 3600s). Token stored in ~/.sarek.oauth
+Logged in via OAuth (expires in 1d). Token stored in ~/.sarek.oauth
 ```
 
 ---
