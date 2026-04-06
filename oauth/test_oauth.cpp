@@ -52,13 +52,13 @@ int main() {
 
     // ── Test 1: signing key generate and persist ─────────────────────────────
     {
-        sarek::oauth_init_signing_key(env);
-        auto key = sarek::oauth_load_signing_key(env);
+        sarek::oauth_init_signing_key(env, system_tray);
+        auto key = sarek::oauth_load_signing_key(env, system_tray);
         assert(key.size() == 32 && "signing key must be 32 bytes");
 
         // Idempotent: second call must not change the key
-        sarek::oauth_init_signing_key(env);
-        auto key2 = sarek::oauth_load_signing_key(env);
+        sarek::oauth_init_signing_key(env, system_tray);
+        auto key2 = sarek::oauth_load_signing_key(env, system_tray);
         assert(key == key2 && "signing key must not change on second init");
         log->info("PASS test1: signing key");
     }
@@ -98,7 +98,7 @@ int main() {
 
     // ── Test 4: JWT issue and verify round-trip ───────────────────────────────
     {
-        auto key = sarek::oauth_load_signing_key(env);
+        auto key = sarek::oauth_load_signing_key(env, system_tray);
         std::vector<std::string> assertions{"/*", "usr:alice"};
 
         std::string jwt = sarek::oauth_issue_jwt(key, "alice", assertions, 3600);
@@ -116,7 +116,7 @@ int main() {
 
     // ── Test 5: expired JWT is rejected ─────────────────────────────────────
     {
-        auto key = sarek::oauth_load_signing_key(env);
+        auto key = sarek::oauth_load_signing_key(env, system_tray);
         // Issue with 1-second TTL, then sleep until it has expired.
         std::string jwt = sarek::oauth_issue_jwt(key, "alice", {"/*"}, 1);
         std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -129,7 +129,7 @@ int main() {
 
     // ── Test 6: tampered JWT is rejected ─────────────────────────────────────
     {
-        auto key = sarek::oauth_load_signing_key(env);
+        auto key = sarek::oauth_load_signing_key(env, system_tray);
         std::string jwt = sarek::oauth_issue_jwt(key, "alice", {"/*"}, 3600);
         // Flip a bit in the signature (last segment)
         auto dot_pos = jwt.rfind('.');
@@ -161,6 +161,32 @@ int main() {
         assert(!revoked2 && "revoke of absent client must return false");
 
         log->info("PASS test7: revoke client");
+    }
+
+    // ── Test 8: migration — plaintext key is detected and replaced ───────────
+    {
+        // Overwrite the encrypted key with a raw plaintext blob to simulate
+        // a pre-encryption installation.
+        std::vector<uint8_t> fake_plaintext{0x01, 0x02, 0x03, 0x04};
+        // NOTE: "__signing_key__" must match kSigningKeyEntry in oauth.cpp (static, not exported).
+        // If that constant changes, update this literal to match or the test becomes a no-op.
+        env.oauth_client().put("__signing_key__", fake_plaintext);
+
+        // oauth_init_signing_key must detect it is not valid OBIWAN ciphertext,
+        // delete it, and generate a fresh encrypted key.
+        sarek::oauth_init_signing_key(env, system_tray);
+
+        // load must now succeed and return exactly 32 bytes.
+        auto key = sarek::oauth_load_signing_key(env, system_tray);
+        assert(key.size() == 32 && "migrated key must be 32 bytes");
+
+        // The key is 32 random bytes from RAND_bytes; the plaintext was 4 bytes of {1,2,3,4}.
+        // Different sizes guarantee inequality, so the meaningful invariant is the size check above.
+        // Additionally confirm the first bytes don't accidentally match the fake prefix.
+        assert((key[0] != 0x01 || key[1] != 0x02 || key[2] != 0x03 || key[3] != 0x04) &&
+               "migrated key must differ from fake plaintext prefix");
+
+        log->info("PASS test8: migration from plaintext key");
     }
 
     cleanup(db_path);
