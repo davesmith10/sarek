@@ -1374,6 +1374,79 @@ static void register_routes(
         }
     });
 
+    // ── GET /admin/keyring-status  (admin only) ──────────────────────────────────
+    svr.Get("/admin/keyring-status", [&](const httplib::Request& req, httplib::Response& res) {
+        auto claims = try_auth(req, res, tok_tray, env, oauth_signing_key);
+        if (!claims) return;
+        if (!is_admin(*claims)) {
+            get_logger()->warn("[cmd=keyring-status] admin required user={} addr={}",
+                               claims->username, req.remote_addr);
+            res.status = 403;
+            res.set_content(jerr("admin required"), "application/json");
+            return;
+        }
+        get_logger()->info("[cmd=keyring-status] by={} addr={}",
+                           claims->username, req.remote_addr);
+        try {
+            auto qi = keyring_query_quota();
+
+            // System tray UUID — null if tray not loaded yet
+            json system_tray_uuid = nullptr;
+            try {
+                auto sys_tray = load_system_tray(env);
+                system_tray_uuid = sys_tray.id;
+            } catch (...) {}
+
+            // Headroom assessment
+            std::string headroom = "unknown";
+            if (qi.bytes_quota > 0) {
+                long avail = qi.bytes_quota - qi.bytes_used;
+                if (avail < 0) avail = 0;
+                long avail_pct = avail * 100L / qi.bytes_quota;
+                if      (avail_pct >= 50) headroom = "ok";
+                else if (avail_pct >= 20) headroom = "low";
+                else                      headroom = "critical";
+            }
+
+            // Advice string — null when nothing to warn about
+            json advice = nullptr;
+            if (!qi.is_root && qi.bytes_quota > 0 && qi.bytes_quota <= 25000) {
+                advice = "Default non-root quota (" + std::to_string(qi.bytes_quota) +
+                         " bytes) is too small for SAREK trays (~15 KB). "
+                         "Raise via: sysctl -w kernel.keys.maxbytes=<N> "
+                         "or add kernel.keys.maxbytes=<N> to /etc/sysctl.conf";
+            } else if (headroom == "critical" || headroom == "low") {
+                const char* sysctl_key = qi.is_root
+                    ? "kernel.keys.root_maxbytes"
+                    : "kernel.keys.maxbytes";
+                advice = std::string("Keyring quota headroom is ") + headroom + ". "
+                         "Raise via: sysctl -w " + sysctl_key + "=<N> "
+                         "or add " + sysctl_key + "=<N> to /etc/sysctl.conf";
+            }
+
+            json out = {
+                {"uid",                       static_cast<unsigned int>(qi.uid)},
+                {"is_root",                   qi.is_root},
+                {"keys_used",                 qi.keys_used},
+                {"keys_limit",                qi.keys_limit},
+                {"bytes_used",                qi.bytes_used},
+                {"bytes_quota",               qi.bytes_quota},
+                {"sysctl_maxbytes",           qi.sysctl_maxbytes},
+                {"sysctl_root_maxbytes",      qi.sysctl_root_maxbytes},
+                {"sysctl_maxkeys",            qi.sysctl_maxkeys},
+                {"big_key_available",         qi.big_key_available},
+                {"system_tray_uuid",          system_tray_uuid},
+                {"oauth_signing_key_present", oauth_signing_key.is_valid()},
+                {"headroom",                  headroom},
+                {"advice",                    advice},
+            };
+            res.set_content(out.dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(jerr(e.what()), "application/json");
+        }
+    });
+
     // ── Health check ─────────────────────────────────────────────────────────
     svr.Get("/health", [](const httplib::Request& req, httplib::Response& res) {
         get_logger()->info("[cmd=health] addr={}", req.remote_addr);
