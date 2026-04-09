@@ -195,7 +195,8 @@ std::string oauth_issue_jwt(
     const std::vector<uint8_t>& signing_key,
     const std::string& username,
     const std::vector<std::string>& assertions,
-    int64_t ttl_secs)
+    int64_t ttl_secs,
+    const std::string& aud_id)
 {
     cjose_err err{};
     cjose_jwk_t* jwk = cjose_jwk_create_oct_spec(
@@ -221,7 +222,7 @@ std::string oauth_issue_jwt(
         "sarek",            // iss
         username.c_str(),   // sub
         nullptr,            // client_id claim (unused)
-        "sarek",            // aud
+        aud_id.empty() ? "sarek" : aud_id.c_str(),  // aud
         exp,
         true,               // include iat
         true,               // include jti
@@ -245,7 +246,8 @@ std::string oauth_issue_jwt(
 
 TokenClaims oauth_verify_jwt(
     const std::vector<uint8_t>& signing_key,
-    const std::string& jwt_str)
+    const std::string& jwt_str,
+    const std::string& aud_id)
 {
     cjose_err err{};
 
@@ -300,6 +302,26 @@ TokenClaims oauth_verify_jwt(
     if (json_integer_value(exp_j) < static_cast<json_int_t>(std::time(nullptr))) {
         json_decref(claims_j);
         throw std::runtime_error("JWT has expired");
+    }
+
+    // Check aud when a deployment ID is configured
+    if (!aud_id.empty()) {
+        json_t* aud_j = json_object_get(claims_j, "aud");
+        bool match = false;
+        if (aud_j && json_is_string(aud_j)) {
+            match = (aud_id == json_string_value(aud_j));
+        } else if (aud_j && json_is_array(aud_j)) {
+            size_t idx; json_t* item;
+            json_array_foreach(aud_j, idx, item) {
+                if (json_is_string(item) && aud_id == json_string_value(item)) {
+                    match = true; break;
+                }
+            }
+        }
+        if (!match) {
+            json_decref(claims_j);
+            throw std::runtime_error("JWT audience mismatch");
+        }
     }
 
     // Extract sub

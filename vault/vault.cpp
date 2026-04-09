@@ -1628,4 +1628,21 @@ int purge_expired_wrapped(SarekEnv& env) {
     return n;
 }
 
+int migrate_admin_assertion(SarekEnv& env) {
+    auto users = list_users(env);
+    int updated = 0;
+    for (auto& [username, rec] : users) {
+        if (!(rec.flags & kUserFlagAdmin)) continue;
+        bool has_adm = false;
+        for (const auto& a : rec.assertions)
+            if (a == "adm:true") { has_adm = true; break; }
+        if (has_adm) continue;
+        rec.assertions.push_back("adm:true");
+        env.user().put(username, pack_user_record(rec));
+        get_logger()->info("user.migrate: added adm:true assertion for user={}", username);
+        ++updated;
+    }
+    return updated;
+}
+
 } // namespace sarek

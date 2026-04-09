@@ -305,7 +305,7 @@ std::unique_ptr<SarekEnv> run_bootstrap(const SarekConfig& cfg,
     admin.user_id    = 1;
     admin.pwhash     = hash_password(admin_password, scrypt_n_log2);
     admin.flags      = kUserFlagAdmin;
-    admin.assertions = {"usr:" + cfg.admin_user, "/*"};
+    admin.assertions = {"usr:" + cfg.admin_user, "adm:true", "/*"};
 
     auto admin_bytes = pack_user_record(admin);
     env->user().put(cfg.admin_user, admin_bytes, txn.get());

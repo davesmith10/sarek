@@ -120,6 +120,49 @@ static void test_wrong_tray_rejected() {
     fs::remove_all(dir);
 }
 
+static void test_aud_id_assertion() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    Tray tok_tray = sarek::load_tray_by_alias(*env, "system-token");
+    auto user_opt = sarek::load_user(*env, "admin");
+
+    const std::string aud = "11111111-1111-4111-8111-111111111111";
+    const std::string other_aud = "22222222-2222-4222-8222-222222222222";
+
+    // Issue with aud_id — token must carry "aud:<uuid>" assertion.
+    auto wire = sarek::issue_token(*user_opt, tok_tray, 86400, aud);
+    assert(!wire.empty());
+
+    // Validate with correct aud_id — must succeed.
+    auto claims = sarek::validate_token(wire, tok_tray, aud);
+    assert(claims.username == "admin");
+    bool has_aud = false;
+    for (const auto& a : claims.assertions)
+        if (a == "aud:" + aud) { has_aud = true; break; }
+    assert(has_aud);
+
+    // Validate with wrong aud_id — must throw.
+    bool threw = false;
+    try {
+        sarek::validate_token(wire, tok_tray, other_aud);
+    } catch (const std::runtime_error& e) {
+        std::string msg(e.what());
+        threw = (msg.find("audience") != std::string::npos);
+    }
+    assert(threw);
+
+    // Validate without aud_id check (empty string) — must succeed even though
+    // the token carries an aud assertion.
+    auto claims2 = sarek::validate_token(wire, tok_tray, "");
+    assert(claims2.username == "admin");
+
+    std::puts("aud_id assertion: OK");
+
+    fs::remove_all(dir);
+}
+
 static void test_authenticate_user_correct() {
     std::string dir = make_tmpdir();
     auto cfg = make_cfg(dir);
@@ -222,6 +265,7 @@ int main() {
     std::srand(54321);
 
     test_issue_validate();
+    test_aud_id_assertion();
     test_wrong_tray_rejected();
     test_authenticate_user_correct();
     test_authenticate_user_wrong_password();

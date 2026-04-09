@@ -3,6 +3,8 @@
 #include "bootstrap/bootstrap.hpp"
 #include "http/http.hpp"
 #include "log/log.hpp"
+#include "vault/vault.hpp"
+#include "auth/aud_id.hpp"
 
 #include <crystals/crystals.hpp>
 
@@ -186,6 +188,15 @@ int main(int argc, char* argv[]) {
     log->info("config loaded from {}", config_path);
     log->info("db_path={} port={}", cfg.db_path, cfg.http_port);
 
+    // ── Load (or create) the persistent deployment audience ID ───────────────
+    try {
+        cfg.aud_id = sarek::load_or_create_aud_id(cfg.aud_id_file);
+        log->info("audience ID: {} (file: {})", cfg.aud_id, cfg.aud_id_file);
+    } catch (const std::exception& e) {
+        log->error("failed to load/create audience ID: {}", e.what());
+        return 1;
+    }
+
     // ── Bootstrap or open DB ──────────────────────────────────────────────────
     std::unique_ptr<sarek::SarekEnv> env;
     try {
@@ -207,6 +218,11 @@ int main(int argc, char* argv[]) {
             log->info("loading system tray into keyring");
             init_system_tray_keyring(*env, cfg, tray_pw_file);
             log->info("system tray loaded into keyring");
+
+            // Backfill adm:true assertion for any admin users that predate this feature.
+            int migrated = sarek::migrate_admin_assertion(*env);
+            if (migrated > 0)
+                log->info("migration: added adm:true assertion to {} user(s)", migrated);
         }
     } catch (const std::exception& e) {
         log->error("startup failed: {}", e.what());

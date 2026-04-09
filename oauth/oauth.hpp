@@ -58,17 +58,22 @@ std::string oauth_authenticate_client(SarekEnv& env,
 // Returns a compact JWT string (header.payload.signature).
 // Uses liboauth2's oauth2_jwt_create internally.
 // ttl_secs: token lifetime in seconds (default 3600 = 1 hour).
+// aud_id: deployment audience UUID used as the JWT "aud" claim; falls back to
+//         "sarek" when empty (legacy / test behaviour).
 std::string oauth_issue_jwt(
     const std::vector<uint8_t>& signing_key,
     const std::string& username,
     const std::vector<std::string>& assertions,
-    int64_t ttl_secs = 3600);
+    int64_t ttl_secs = 3600,
+    const std::string& aud_id = "");
 
-// Verify a JWT signature and expiry; extract claims.
-// Throws std::runtime_error on bad signature, expiry, or malformed payload.
+// Verify a JWT signature, expiry, and (when aud_id is non-empty) audience claim.
+// Throws std::runtime_error on bad signature, expiry, audience mismatch, or
+// malformed payload.
 // Uses cjose directly for verification.
 TokenClaims oauth_verify_jwt(
     const std::vector<uint8_t>& signing_key,
-    const std::string& jwt_str);
+    const std::string& jwt_str,
+    const std::string& aud_id = "");
 
 } // namespace sarek

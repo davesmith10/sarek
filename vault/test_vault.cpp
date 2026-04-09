@@ -4,6 +4,7 @@
 
 #include <crystals/crystals.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -782,6 +783,68 @@ static void test_delete_user_purges_assertions() {
 }
 
 // ---------------------------------------------------------------------------
+static void test_migrate_admin_assertion() {
+    std::string dir = make_tmpdir();
+    auto cfg = make_cfg(dir);
+    // Bootstrap creates admin. After Task 2 is done, bootstrap will add "adm:true"
+    // automatically. This test strips it if present to simulate a pre-migration DB,
+    // then verifies migration adds it back.
+    auto env = sarek::run_bootstrap(cfg, "secret", make_test_system_tray(), 14);
+
+    // Strip "adm:true" from admin record to simulate a pre-migration database.
+    {
+        auto bytes = env->user().get(cfg.admin_user);
+        assert(bytes.has_value());
+        sarek::UserRecord rec = sarek::unpack_user_record(*bytes);
+        rec.assertions.erase(
+            std::remove(rec.assertions.begin(), rec.assertions.end(), std::string("adm:true")),
+            rec.assertions.end());
+        env->user().put(cfg.admin_user, sarek::pack_user_record(rec));
+    }
+
+    // First migration: must return 1 (admin record updated).
+    int n = sarek::migrate_admin_assertion(*env);
+    assert(n == 1);
+
+    // Admin record must now contain "adm:true" and retain pre-existing assertions.
+    {
+        auto bytes = env->user().get(cfg.admin_user);
+        assert(bytes.has_value());
+        sarek::UserRecord rec = sarek::unpack_user_record(*bytes);
+        bool has_adm = false, has_usr = false, has_scope = false;
+        for (const auto& a : rec.assertions) {
+            if (a == "adm:true")                has_adm   = true;
+            if (a == "usr:" + cfg.admin_user)   has_usr   = true;
+            if (a == "/*")                      has_scope = true;
+        }
+        assert(has_adm);    // new assertion present
+        assert(has_usr);    // original usr: assertion preserved
+        assert(has_scope);  // original /* scope preserved
+    }
+
+    // Second call must return 0 (idempotent).
+    int n2 = sarek::migrate_admin_assertion(*env);
+    assert(n2 == 0);
+
+    // Non-admin user must not receive "adm:true".
+    sarek::create_user(*env, "bob", "bobpass", 0, {"usr:bob"}, 99, 14);
+    int n3 = sarek::migrate_admin_assertion(*env);
+    assert(n3 == 0);
+    {
+        auto bytes = env->user().get("bob");
+        assert(bytes.has_value());
+        sarek::UserRecord rec = sarek::unpack_user_record(*bytes);
+        bool has_adm = false;
+        for (const auto& a : rec.assertions)
+            if (a == "adm:true") { has_adm = true; break; }
+        assert(!has_adm);
+    }
+
+    std::puts("migrate_admin_assertion: OK");
+    fs::remove_all(dir);
+}
+
+// ---------------------------------------------------------------------------
 int main() {
     std::srand(99999);
 
@@ -810,6 +873,7 @@ int main() {
     test_etag_match_succeeds();
     test_etag_mismatch_throws();
     test_etag_zero_skips_check();
+    test_migrate_admin_assertion();
 
     std::puts("\nAll vault tests passed.");
     return 0;

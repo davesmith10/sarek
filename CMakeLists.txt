@@ -152,6 +152,7 @@ target_compile_options(sarek_bootstrap_test PRIVATE -Wall -Wextra)
 # ── Module 5: auth ────────────────────────────────────────────────────────────
 add_library(sarek_auth STATIC
     auth/auth.cpp
+    auth/aud_id.cpp
 )
 target_include_directories(sarek_auth PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}

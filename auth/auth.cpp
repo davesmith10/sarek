@@ -141,11 +141,19 @@ static Tray tray_from_yaml_bytes(const std::vector<uint8_t>& bytes) {
 
 std::vector<uint8_t> issue_token(const UserRecord& user,
                                   const Tray& system_token_tray,
-                                  int64_t ttl_secs) {
+                                  int64_t ttl_secs,
+                                  const std::string& aud_id) {
     const Slot& sig_slot = require_ecdsa_p256_slot(system_token_tray, /*need_sk=*/true);
 
-    // Encode assertions into the data field (newline-separated, max 256 bytes).
+    // Build the assertion payload.  Prepend aud:<uuid> when a deployment ID is set
+    // so tokens from one installation cannot be replayed against another.
     std::string data_str = join_assertions(user.assertions);
+    if (!aud_id.empty()) {
+        std::string aud_assertion = "aud:" + aud_id;
+        data_str = data_str.empty()
+            ? aud_assertion
+            : data_str + "\n" + aud_assertion;
+    }
     if (data_str.empty() || data_str.size() > 256)
         throw std::runtime_error(
             "issue_token: assertions encode to " + std::to_string(data_str.size()) +
@@ -170,7 +178,8 @@ std::vector<uint8_t> issue_token(const UserRecord& user,
 // ---------------------------------------------------------------------------
 
 TokenClaims validate_token(const std::vector<uint8_t>& wire,
-                            const Tray& system_token_tray_pub) {
+                            const Tray& system_token_tray_pub,
+                            const std::string& aud_id) {
     Token tok = token_unpack(wire);
 
     // Time bounds
@@ -206,6 +215,17 @@ TokenClaims validate_token(const std::vector<uint8_t>& wire,
     }
     if (username.empty())
         throw std::runtime_error("validate_token: no 'usr:' assertion found in token data");
+
+    // Audience check: if the server has a deployment ID, the token must carry it.
+    if (!aud_id.empty()) {
+        const std::string expected = "aud:" + aud_id;
+        bool found = false;
+        for (const auto& a : assertions) {
+            if (a == expected) { found = true; break; }
+        }
+        if (!found)
+            throw std::runtime_error("validate_token: audience mismatch");
+    }
 
     return {username, assertions, format_uuid(tok.token_uuid)};
 }

@@ -115,13 +115,14 @@ static void test_run_bootstrap() {
     assert(!admin.pwhash.empty());
     assert(admin.flags & sarek::kUserFlagAdmin);
 
-    // Assertions should contain "usr:admin" and "/*"
-    bool has_usr = false, has_wildcard = false;
+    // Assertions should contain "usr:admin", "adm:true", and "/*"
+    bool has_usr = false, has_adm = false, has_wildcard = false;
     for (const auto& a : admin.assertions) {
-        if (a == "usr:" + cfg.admin_user) has_usr       = true;
-        if (a == "/*")                    has_wildcard  = true;
+        if (a == "usr:" + cfg.admin_user) has_usr      = true;
+        if (a == "adm:true")              has_adm      = true;
+        if (a == "/*")                    has_wildcard = true;
     }
-    assert(has_usr && has_wildcard);
+    assert(has_usr && has_adm && has_wildcard);
 
     std::puts("bootstrap admin user: OK");
 

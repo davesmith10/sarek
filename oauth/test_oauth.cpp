@@ -143,6 +143,35 @@ int main() {
         log->info("PASS test6: tampered JWT rejected");
     }
 
+    // ── Test 7a: JWT aud claim matches deployment UUID ───────────────────────
+    {
+        auto key = sarek::oauth_load_signing_key(env, system_tray);
+        const std::string aud = "a1b2c3d4-0001-4001-8001-aabbccddeeff";
+        const std::string other_aud = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+
+        // Issue with aud_id — JWT "aud" claim must equal the UUID.
+        std::string jwt = sarek::oauth_issue_jwt(key, "alice", {"/*", "usr:alice"}, 3600, aud);
+        assert(!jwt.empty());
+
+        // Verify with correct aud_id — must succeed.
+        sarek::TokenClaims claims = sarek::oauth_verify_jwt(key, jwt, aud);
+        assert(claims.username == "alice");
+
+        // Verify with wrong aud_id — must throw with "audience".
+        bool threw = false;
+        try { sarek::oauth_verify_jwt(key, jwt, other_aud); }
+        catch (const std::runtime_error& e) {
+            threw = (std::string(e.what()).find("audience") != std::string::npos);
+        }
+        assert(threw && "wrong aud_id must throw audience mismatch");
+
+        // Verify without aud check (empty aud_id) — must succeed.
+        sarek::TokenClaims claims2 = sarek::oauth_verify_jwt(key, jwt, "");
+        assert(claims2.username == "alice");
+
+        log->info("PASS test7a: JWT aud claim (deployment UUID)");
+    }
+
     // ── Test 7: revoke client removes credentials ─────────────────────────────
     {
         std::vector<std::string> assertions{"usr:bob"};

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -121,6 +122,16 @@ SarekConfig load_config(const std::string& path) {
         cfg.system_tray_path = root["tray"]["system"].as<std::string>();
     if (root["tray"] && root["tray"]["password-file"])
         cfg.system_tray_password_file = root["tray"]["password-file"].as<std::string>();
+
+    // server.aud-id-file — path to deployment audience ID (optional, derived default)
+    if (root["server"] && root["server"]["aud-id-file"]) {
+        cfg.aud_id_file = root["server"]["aud-id-file"].as<std::string>();
+    } else {
+        // Default: <dir_of_config_file>/sarek/audience-id
+        // e.g. /etc/sarek.yml -> /etc/sarek/audience-id
+        std::filesystem::path cp(path);
+        cfg.aud_id_file = (cp.parent_path() / "sarek" / "audience-id").string();
+    }
 
     check_file_readable("tls.cert",           cfg.tls_cert);
     check_file_readable("tls.key",            cfg.tls_key);

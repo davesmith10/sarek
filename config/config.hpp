@@ -25,6 +25,13 @@ struct SarekConfig {
     // System tray import (optional — TTY prompt used if absent)
     std::string system_tray_path;            // tray.system
     std::string system_tray_password_file;   // tray.password-file  (system tray decrypt password)
+
+    // Audience ID file — path to the persistent deployment UUID (created on
+    // first start if absent). Default derived from config file location.
+    std::string aud_id_file;  // server.aud-id-file (optional, has default)
+
+    // Runtime-populated by main.cpp after load_config — not from YAML.
+    std::string aud_id;
 };
 
 // Throws std::runtime_error  if file is missing or a required field is absent.

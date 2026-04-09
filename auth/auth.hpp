@@ -27,15 +27,20 @@ struct TokenClaims {
 // Sign and issue a token for user using the system-token tray's ECDSA P-256 key.
 // Assertions are stored as newline-separated bytes in the token data field.
 // ttl_secs: token lifetime in seconds (default 86400 = 24 h).
+// aud_id: deployment audience UUID (added as "aud:<uuid>" assertion); empty = omitted.
 // Throws if tray has no ECDSA P-256 signing slot, or if assertions exceed 256 bytes.
 std::vector<uint8_t> issue_token(const UserRecord& user,
                                   const Tray& system_token_tray,
-                                  int64_t ttl_secs = 86400);
+                                  int64_t ttl_secs = 86400,
+                                  const std::string& aud_id = "");
 
 // Parse and verify a token wire.
-// Throws std::runtime_error on bad format, expiry, bad signature, or UUID mismatch.
+// aud_id: if non-empty, the token must carry an "aud:<aud_id>" assertion.
+// Throws std::runtime_error on bad format, expiry, bad signature, UUID mismatch,
+// or audience mismatch.
 TokenClaims validate_token(const std::vector<uint8_t>& wire,
-                            const Tray& system_token_tray_pub);
+                            const Tray& system_token_tray_pub,
+                            const std::string& aud_id = "");
 
 // ---------------------------------------------------------------------------
 // DB helpers

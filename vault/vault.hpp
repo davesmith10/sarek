@@ -86,6 +86,12 @@ void update_user_password(SarekEnv& env,
                           const std::string& new_password,
                           uint8_t scrypt_n_log2 = 20);
 
+// Backfill "adm:true" into every user record that has kUserFlagAdmin set
+// but lacks the assertion. Safe to call on every startup (idempotent).
+// Must be called before the HTTP server starts accepting connections.
+// Returns the number of records updated.
+int migrate_admin_assertion(SarekEnv& env);
+
 // ---------------------------------------------------------------------------
 // TrayService
 // ---------------------------------------------------------------------------
